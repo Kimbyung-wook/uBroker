@@ -4,21 +4,24 @@ English | [한국어](README_kr.md)
 
 ## 1. Overview
 
-uBroker is a **statically allocated Pub/Sub message broker for FreeRTOS**, with a **Python generator** that turns `.msg` files into C code.
+uBroker is a **statically allocated Pub/Sub message broker for FreeRTOS and POSIX**, with a **Python generator** that turns `.msg` files into C code.
 
 - No dynamic allocation: one static shared buffer per topic (mailbox, latest value only)
 - Unlimited subscribers: the broker keeps no subscriber list (O(1))
-- Non-blocking receive with events and lost-message count, ISR publish, single publisher per topic
+- Non-blocking receive with events and lost-message count, single publisher per topic
+- Optional per-topic FIFO queue (`# QUEUE N`) for events such as commands
+- FreeRTOS (critical sections, ISR publish) or POSIX (pthread mutex per topic), selected by one setting
 
 References: the code structure is based on [**uMsg**](https://github.com/amcolex/umsg), and the message syntax and behavior follow [**PX4 uORB**](https://docs.px4.io/main/en/middleware/uorb.html).
 
 ## 2. Folder Structure
 
 ```
-core/        Fixed broker sources (not generated): ubk_types.h, ubroker.h, ubroker.c
+core/        Fixed broker sources (not generated): ubk_types.h, ubroker.h/.c, OS ports (ubk_port*)
 code_gen/    Code generator: ubroker_gen.py
-test/        Example messages (msg/), generated code (gen/), examples, host tests (host/)
+test/        Shared messages (msg/), FreeRTOS examples/tests (freertos/), POSIX examples/tests (posix/)
 docs/        Detailed documentation
+tools/       Migration tools for existing code: tools/migrate/
 ref/         Reference documents (coding rules)
 ```
 
@@ -35,6 +38,7 @@ flowchart LR
         UH["ubroker.h"]
         UC["ubroker.c"]
         UT["ubk_types.h"]
+        UP["ubk_port.h<br/>ubk_port_freertos.h / ubk_port_posix.h(.c)"]
     end
     subgraph GEN["gen/ (generated)"]
         MH["ubk_msgs.h"]
@@ -49,28 +53,29 @@ flowchart LR
     MH --> XH
     XH --> UT
     MC --> MH
+    UC --> UP
     UC -. "g_ubk_topic_meta[]" .-> MC
 ```
 
-User code includes only `ubroker.h`. Generated files never include `ubroker.*`.
+User code includes only `ubroker.h`. Generated files never include `ubroker.*`. Only `ubroker.c` uses the OS port.
 
 ## 4. How to Use
 
 ```mermaid
 flowchart TD
-    A["1. Define messages<br/>msg/*.msg"] --> B["2. Generate code<br/>ubroker_gen.py -i msg -o gen"]
-    B --> C["3. Build setup<br/>include: core/, gen/<br/>sources: ubroker.c, ubk_msgs.c"]
+    A["1. Define messages<br/>msg/*.msg"] --> B["2. Generate code<br/>ubroker_gen.py -i msg -o gen --os freertos|posix"]
+    B --> C["3. Build setup<br/>include: core/, gen/<br/>sources: ubroker.c, ubk_msgs.c (+ ubk_port_posix.c)<br/>UBK_CFG_PORT = same OS"]
     C --> D["4. Initialize<br/>ubk_init_all()"]
     D --> P1
     D --> S1
-    subgraph PUB["Publisher task / ISR"]
+    subgraph PUB["Publisher task / thread"]
         P1["ubk_advertise(id, &pub)"] --> P2["ubk_publish(id, pub, &msg, sizeof(msg))"]
     end
-    subgraph SUB["Subscriber task"]
+    subgraph SUB["Subscriber task / thread"]
         S1["ubk_sub_t sub = UBK_SUB_INITIALIZER"] --> S2["ubk_subscribe(id, &sub, &msg, sizeof(msg))"]
         S2 --> S3{"sub.event"}
     end
-    P2 --> E["5. Run<br/>vTaskStartScheduler()"]
+    P2 --> E["5. Run<br/>vTaskStartScheduler() / pthread_create()"]
     S3 --> E
 ```
 
@@ -91,13 +96,15 @@ ubk_subscribe(UBK_TOPIC_WEAPON_STATE, &sub, &weapon, sizeof(weapon)); // copy in
 if (sub.event == UBK_EVT_NEW) { }                       // react to a new message; otherwise weapon keeps its last value
 ```
 
-Full examples: [`test/pub.c`](test/pub.c), [`test/sub.c`](test/sub.c). Message syntax: [`docs/msg_syntax.md`](docs/msg_syntax.md)
+Full examples: FreeRTOS [`test/freertos/`](test/freertos), POSIX [`test/posix/`](test/posix). Message syntax: [`docs/msg_syntax.md`](docs/msg_syntax.md)
 
 ## 5. Code Generation
 
 ```
-python code_gen/ubroker_gen.py -i <msg dir> -o <output dir> [--lang en|ko]
+python code_gen/ubroker_gen.py -i <msg dir> -o <output dir> [--os freertos|posix] [--lang en|ko]
 ```
+
+`--os` (default `freertos`) must match the build setting `UBK_CFG_PORT` (`UBK_PORT_FREERTOS` / `UBK_PORT_POSIX`). A mismatch stops the build with `#error`.
 
 | Generated file | Contents |
 |---|---|
@@ -115,8 +122,8 @@ Only changed files are rewritten, and files of deleted `.msg` are removed. Detai
 | `ubk_init_topic(id)` | Initialize one topic (only before it is published) |
 | `ubk_advertise(id, &pub)` | Get publish rights (succeeds once per topic) |
 | `ubk_publish(id, pub, &msg, size)` | Publish from a task |
-| `ubk_publish_from_isr(id, pub, &msg, size)` | Publish from an ISR |
-| `ubk_subscribe(id, &sub, &msg, size)` | Copy if new; result in `sub.event` / `sub.n_lost` |
+| `ubk_publish_from_isr(id, pub, &msg, size)` | Publish from an ISR (FreeRTOS only) |
+| `ubk_subscribe(id, &sub, &msg, size)` | Copy the next message (oldest first); result in `sub.event`, `sub.n_lost`, `sub.n_pending` |
 
 | `sub.event` | Meaning |
 |---|---|
@@ -124,9 +131,9 @@ Only changed files are rewritten, and files of deleted `.msg` are removed. Detai
 | `UBK_EVT_NO_NEW` | No new message (previous value kept) |
 | `UBK_EVT_NEW` | New message copied |
 | `UBK_EVT_NEW_LOST` | New message copied, `n_lost` messages missed |
-| `UBK_EVT_ERR_*` | Error (`NULL`, `SIZE`, `TOPIC`) |
+| `UBK_EVT_ERR_*` | Error (`NULL`, `SIZE`, `TOPIC`, `OS`) |
 
-Details: [`docs/api.md`](docs/api.md) · Configuration and limits: [`docs/configuration.md`](docs/configuration.md) · Tests: [`docs/testing.md`](docs/testing.md) · Design: [`uBroker_design.md`](uBroker_design.md) (Korean)
+Details: [`docs/api.md`](docs/api.md) · Configuration and limits: [`docs/configuration.md`](docs/configuration.md) · Tests: [`docs/testing.md`](docs/testing.md) · Migrating existing code: [`docs/migration.md`](docs/migration.md) · Design: [`uBroker_design.md`](uBroker_design.md) (Korean)
 
 ---
 

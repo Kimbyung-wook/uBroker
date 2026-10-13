@@ -6,11 +6,15 @@
 #include "ubk_types.h"
 #include "sensor_imu.h"
 #include "vector3.h"
+#include "weapon_cmd.h"
 #include "weapon_state.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* Target OS of this generated code (ubroker_gen.py --os freertos), checked against UBK_CFG_PORT by ubroker.c */
+#define UBK_GEN_OS UBK_PORT_FREERTOS
 
 /* Topic IDs (0 is the init value, so it is invalid) */
 typedef enum
@@ -18,6 +22,7 @@ typedef enum
     UBK_TOPIC_INVALID = 0,
     UBK_TOPIC_SENSOR_IMU0,                   /* sensor_imu_t */
     UBK_TOPIC_SENSOR_IMU1,                   /* sensor_imu_t */
+    UBK_TOPIC_WEAPON_CMD,                    /* weapon_cmd_t */
     UBK_TOPIC_WEAPON_STATE,                  /* weapon_state_t */
     UBK_TOPIC_COUNT
 } ubk_topic_id_t;

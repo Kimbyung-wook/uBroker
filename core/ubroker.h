@@ -15,7 +15,10 @@ ubk_result_t ubk_init_all(void);
 ubk_result_t ubk_init_topic(ubk_topic_id_t id);
 ubk_result_t ubk_advertise(ubk_topic_id_t id, ubk_pub_t *p_pub);
 ubk_result_t ubk_publish(ubk_topic_id_t id, ubk_pub_t pub, const void *p_msg, size_t size);
+#if (UBK_CFG_PORT == UBK_PORT_FREERTOS)
+/* FreeRTOS only. POSIX has no ISRs: from a signal handler, wake a thread (sem_post) that calls ubk_publish */
 ubk_result_t ubk_publish_from_isr(ubk_topic_id_t id, ubk_pub_t pub, const void *p_msg, size_t size);
+#endif
 void ubk_subscribe(ubk_topic_id_t id, ubk_sub_t *p_sub, void *p_msg, size_t size);
 
 #ifdef __cplusplus

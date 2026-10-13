@@ -8,4 +8,4 @@ float32     target_y
 uint8       arm_state   : 2  0      # ARM_STATE_* (default: SAFE)
 uint8       error_code  : 6
 bool        is_locked        false
-TickType_t  last_change_tick        # FreeRTOS tick of the last state change
+uint32      last_change_tick        # OS tick of the last state change

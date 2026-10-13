@@ -5,7 +5,7 @@ uBroker message code generator.
 Reads .msg files (uORB syntax + extensions) and generates C headers/sources for FreeRTOS.
 
 Usage:
-    python ubroker_gen.py -i <msg dir> -o <output dir> [--lang en|ko]
+    python ubroker_gen.py -i <msg dir> -o <output dir> [--os freertos|posix] [--lang en|ko]
 
 Outputs:
     <msg>.h                  per-message struct, constants, initializer
@@ -28,6 +28,8 @@ RESERVED_PREFIX = "ubk_"        # prefix not allowed in user field names
 MAX_VAR_NAME = 31               # SCR-G: variable names up to 31 chars
 LANGS = ("en", "ko")
 LANG = "en"                     # message language, set by --lang
+TARGET_OSES = {"freertos": "UBK_PORT_FREERTOS", "posix": "UBK_PORT_POSIX"}
+TARGET_OS = "freertos"          # target OS, set by --os (must match UBK_CFG_PORT)
 
 
 def tr(en, ko):
@@ -106,6 +108,8 @@ RE_FIELD = re.compile(
 )
 RE_TOPICS = re.compile(r"^#\s*TOPICS\s+(.+)$")
 RE_TYPE_ONLY = re.compile(r"^#\s*TYPE_ONLY\s*$")
+RE_QUEUE = re.compile(r"^#\s*QUEUE\s+(\S+)\s*$")
+MAX_QUEUE_LEN = 65536           # QUEUE N: power of 2, 1 ~ 65536
 RE_SNAKE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
@@ -143,6 +147,8 @@ class Message:
         self.constants = []
         self.topics = []
         self.type_only = False          # True: type only (no topic)
+        self.queue_len = 1              # # QUEUE N (1: mailbox)
+        self.queue_line = None          # where # QUEUE was given
 
     @property
     def c_type(self):
@@ -168,6 +174,25 @@ def clean_comment(text):
     return text.strip().replace("*/", "* /").replace("/*", "/ *")
 
 
+def parse_queue(msg, text, where, errors):
+    """# QUEUE N: N must be a power of 2 so slot order survives sequence wrap-around."""
+    if msg.queue_line is not None:
+        errors.append(f"{where}: error: " + tr(f"QUEUE is already given at {msg.queue_line}",
+                                                f"QUEUE 가 이미 {msg.queue_line} 에 있습니다"))
+        return
+    msg.queue_line = where
+    try:
+        n = int(text, 10)
+    except ValueError:
+        n = 0
+    if n < 1 or n > MAX_QUEUE_LEN or (n & (n - 1)) != 0:
+        errors.append(f"{where}: error: " + tr(
+            f"QUEUE length must be a power of 2 between 1 and {MAX_QUEUE_LEN}: '{text}'",
+            f"QUEUE 길이는 1 ~ {MAX_QUEUE_LEN} 사이의 2의 거듭제곱이어야 합니다: '{text}'"))
+        return
+    msg.queue_len = n
+
+
 def parse_msg_file(path, errors):
     base = os.path.splitext(os.path.basename(path))[0]
     msg = Message(camel_to_snake(base), path)
@@ -190,6 +215,11 @@ def parse_msg_file(path, errors):
 
             if RE_TYPE_ONLY.match(stripped):
                 msg.type_only = True
+                continue
+
+            m = RE_QUEUE.match(stripped)
+            if m:
+                parse_queue(msg, m.group(1), where, errors)
                 continue
 
             if stripped.startswith("#"):
@@ -227,6 +257,9 @@ def parse_msg_file(path, errors):
     if msg.type_only and msg.topics:
         errors.append(f"{path}: error: " + tr("TYPE_ONLY and TOPICS cannot be used together",
                                                  "TYPE_ONLY 와 TOPICS 는 함께 쓸 수 없습니다"))
+    elif msg.type_only and msg.queue_line is not None:
+        errors.append(f"{msg.queue_line}: error: " + tr("TYPE_ONLY and QUEUE cannot be used together",
+                                                         "TYPE_ONLY 와 QUEUE 는 함께 쓸 수 없습니다"))
     elif not msg.topics and not msg.type_only:
         msg.topics = [msg.name]
     return msg
@@ -317,6 +350,11 @@ def split_array_default(text):
 # ---------------------------------------------------------------------------
 # Semantic checks
 # ---------------------------------------------------------------------------
+def freertos_type_error(type_name):
+    return tr(f"FreeRTOS type '{type_name}' is not available with --os {TARGET_OS}",
+              f"FreeRTOS 타입 '{type_name}' 은 --os {TARGET_OS} 에서 쓸 수 없습니다")
+
+
 def validate(messages, errors):
     by_name = {m.name: m for m in messages}
 
@@ -346,6 +384,9 @@ def validate(messages, errors):
             if info is None:
                 errors.append(f"{c.line}: error: " + tr(f"constant type must be a builtin type: '{c.type_name}'",
                                                        f"상수 타입은 기본 타입이어야 합니다: '{c.type_name}'"))
+                continue
+            if info.freertos and TARGET_OS != "freertos":
+                errors.append(f"{c.line}: error: " + freertos_type_error(c.type_name))
                 continue
             if c.name in names:
                 errors.append(f"{c.line}: error: " + tr(f"duplicate name: '{c.name}'", f"이름 중복: '{c.name}'"))
@@ -379,6 +420,9 @@ def validate(messages, errors):
 
             if fld.type_name in BUILTIN_TYPES:
                 info = BUILTIN_TYPES[fld.type_name]
+                if info.freertos and TARGET_OS != "freertos":
+                    errors.append(f"{fld.line}: error: " + freertos_type_error(fld.type_name))
+                    continue
             elif fld.type_name in by_name:
                 fld.nested = by_name[fld.type_name]
                 info = None
@@ -574,6 +618,8 @@ def gen_msg_header(msg):
         out.append("\n")
 
     topics = ", ".join(topic_enum(t) for t in msg.topics) or "none (TYPE_ONLY)"
+    if msg.topics and msg.queue_len > 1:
+        topics += f" (queue of {msg.queue_len}, FIFO)"
     out.append(f"/* {desc}\n * - topics: {topics}\n"
                f" * - pack(1): do not pass member addresses (&msg.field) as pointers */\n")
     out.append("#pragma pack(push, 1)\ntypedef struct\n{\n")
@@ -616,6 +662,10 @@ def gen_msgs_header(messages):
         out.append(f'#include "{m.name}.h"\n')
     out.append('\n#ifdef __cplusplus\nextern "C" {\n#endif\n\n')
 
+    out.append(f"/* Target OS of this generated code (ubroker_gen.py --os {TARGET_OS}), "
+               f"checked against UBK_CFG_PORT by ubroker.c */\n")
+    out.append(f"#define UBK_GEN_OS {TARGET_OSES[TARGET_OS]}\n\n")
+
     out.append("/* Topic IDs (0 is the init value, so it is invalid) */\ntypedef enum\n{\n")
     out.append(f"    {TOPIC_INVALID_ENUM} = 0,\n")
     for m, t in all_topics(messages):
@@ -639,11 +689,12 @@ def gen_msgs_source(messages):
 
     out.append("\n/* ---- Topic shared memory ---- */\n\n")
     for m, t in topics:
-        out.append(f"static {m.c_type} s_{t}_data = {m.upper}_INITIALIZER;\n")
+        out.append(f"static {m.c_type} s_{t}_data[{m.queue_len}U] = {{ {m.upper}_INITIALIZER }};"
+                   f"   /* ubk_init_topic fills every slot */\n")
 
     out.append(f"\nconst ubk_topic_meta_t g_ubk_topic_meta[{TOPIC_COUNT_ENUM}] =\n{{\n")
-    rows = [f"    [{TOPIC_INVALID_ENUM}] = {{ NULL, NULL, 0U, UBK_PUB_INVALID }}"]
-    rows += [f"    [{topic_enum(t)}] = {{ &s_{t}_data, &s_{m.name}_default, sizeof({m.c_type}), "
+    rows = [f"    [{TOPIC_INVALID_ENUM}] = {{ NULL, NULL, 0U, 0U, UBK_PUB_INVALID }}"]
+    rows += [f"    [{topic_enum(t)}] = {{ s_{t}_data, &s_{m.name}_default, sizeof({m.c_type}), {m.queue_len}U, "
              f"(ubk_pub_t)0x{topic_key(t):08X}U }}" for m, t in topics]
     out.append(",\n".join(rows) + "\n};\n")
     return "".join(out)
@@ -683,7 +734,13 @@ def main(argv=None):
     ap.add_argument("-o", "--output", required=True, help=tr("folder for generated files", "생성 파일을 저장할 폴더"))
     ap.add_argument("--lang", choices=LANGS, default="en",
                     help=tr("message language (default: en)", "메시지 언어 (기본값: en)"))
+    ap.add_argument("--os", dest="target_os", choices=tuple(TARGET_OSES), default="freertos",
+                    help=tr("target OS, must match UBK_CFG_PORT (default: freertos)",
+                            "대상 OS, UBK_CFG_PORT 와 같아야 함 (기본값: freertos)"))
     args = ap.parse_args(argv)
+
+    global TARGET_OS
+    TARGET_OS = args.target_os
 
     if not os.path.isdir(args.input):
         print("error: " + tr(f"input folder not found: {args.input}", f"입력 폴더가 없습니다: {args.input}"),

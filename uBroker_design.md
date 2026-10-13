@@ -1,4 +1,4 @@
-# uBroker 요구사항 및 설계 명세 (v0.8)
+# uBroker 요구사항 및 설계 명세 (v1.0)
 
 > 초기 설계안(v0.1)에 검토 결과와 결정사항을 반영해 정리한 문서입니다.
 > 참고 구현: [uMsg](https://github.com/amcolex/umsg)(코드 구조), [PX4 uORB](https://docs.px4.io/main/en/middleware/uorb.html)(메시지 문법·동작 방식)
@@ -8,7 +8,7 @@
 
 ## 1. 개요
 
-uBroker는 FreeRTOS 기반 임베디드 시스템을 위한 **정적 할당 Pub/Sub 메시지 브로커**입니다.
+uBroker는 FreeRTOS 기반 임베디드 시스템과 POSIX 시스템을 위한 **정적 할당 Pub/Sub 메시지 브로커**입니다. OS 의존 부분은 포트 계층(D9)으로 분리되어 있습니다.
 
 1. 개발자가 `.msg` 파일로 메시지를 정의합니다 (uORB 문법 + 확장).
 2. `code_gen/ubroker_gen.py`가 메시지별 C 구조체와 **토픽 테이블**을 생성합니다. API는 토픽 ID를 인자로 받는 공통 함수입니다 (uORB의 `ORB_ID` 방식).
@@ -25,15 +25,16 @@ uBroker는 FreeRTOS 기반 임베디드 시스템을 위한 **정적 할당 Pub/
 |---|---|
 | FR-01 | `.msg` 텍스트 파일로 메시지를 정의한다. 문법은 uORB를 따르고, FreeRTOS 타입·비트필드·기본값(ROS2 문법)을 확장으로 지원한다. |
 | FR-02 | API는 토픽 ID(`ubk_topic_id_t`)를 인자로 받는 공통 함수로 제공한다. 메시지는 `const void *` + `size`로 넘기며, 토픽 메시지 크기와 다르면 거부한다. 토픽이 늘어도 늘어나는 코드는 테이블 항목뿐이다. |
-| FR-03 | 구독자는 항상 가장 최근에 발행된 값 1개만 받는다 (Mailbox). |
+| FR-03 | 기본은 가장 최근에 발행된 값 1개만 보관한다 (Mailbox). `# QUEUE N` 토픽은 최근 N개를 보관하고 구독자는 오래된 것부터 받는다 (FIFO, v1.0). |
 | FR-04 | 수신은 Non-blocking이다. 결과는 커서의 `event`로 알려 주며, 새 데이터가 없으면 로컬 변수는 직전 값을 유지한다. |
-| FR-05 | ISR 안에서 발행할 수 있는 전용 API를 제공한다. |
+| FR-05 | ISR 안에서 발행할 수 있는 전용 API를 제공한다 (FreeRTOS). POSIX는 ISR이 없으므로 제공하지 않는다 (D9). |
 | FR-06 | 메시지의 모든 필드는 초기화된다. 기본값이 지정되면 그 값, 아니면 0이다. |
 | FR-07 | 한 토픽의 발행자는 하나로 제한한다 (advertise로 받는 발행 핸들 `ubk_pub_t`). |
 | FR-08 | 같은 구조체로 여러 토픽(다중 인스턴스)을 정의할 수 있다 (`# TOPICS`). |
 | FR-09 | 직전 수신 이후 놓친 발행 횟수를 알 수 있다 (커서의 `n_lost`). |
 | FR-10 | 전체 토픽 초기화 함수(`ubk_init_all`)를 생성한다. 초기화는 발행 전에만 가능하다. |
 | FR-11 | 생성기는 입력 폴더와 출력 폴더를 인자로 받는다. |
+| FR-12 | FreeRTOS와 POSIX를 지원한다. 빌드 설정 `UBK_CFG_PORT`와 생성기 `--os`로 고르며, 둘이 다르면 빌드 오류가 난다 (v0.9). |
 
 ### 2.2 비기능 요구사항
 
@@ -52,8 +53,8 @@ uBroker는 FreeRTOS 기반 임베디드 시스템을 위한 **정적 할당 Pub/
 | Stale(오래된 데이터) 감지 | uORB와 같이 브로커가 다루지 않는다. 필요하면 사용자가 `timestamp` 필드로 판단한다. **기능이 없다는 점을 사용 시 반드시 고려할 것.** |
 | 이벤트 기반 대기 (블로킹 수신) | 태스크 주기마다 `subscribe()` 후 커서의 `event`로 확인한다. |
 | 메시지 버전/해시 | VCS로 관리한다. |
-| OS 추상화 계층 | 현재 FreeRTOS 전용. 필요해지면 추가한다. |
-| 멀티코어(SMP) | 추후 과제. 현재는 단일 코어 Critical Section 기준이다. |
+| 그 밖의 OS | FreeRTOS, POSIX 외의 OS는 포트(`ubk_port_<os>.h`)를 추가해 지원한다 (D9). |
+| 멀티코어(SMP) FreeRTOS | FreeRTOS 포트는 단일 코어 Critical Section 기준이다. POSIX 포트는 mutex라 멀티코어에서도 안전하다. |
 | 가변 길이 필드 | uORB와 같이 고정 길이 배열만 지원한다. |
 
 ---
@@ -63,20 +64,27 @@ uBroker는 FreeRTOS 기반 임베디드 시스템을 위한 **정적 할당 Pub/
 ### D1. Queue 대신 토픽당 정적 공유 메모리 1개
 - Queue는 구독자마다 버퍼가 필요하지만(O(N)), 공유 메모리는 구독자 수와 관계없이 1개(O(1))다.
 
-### D2. 동시성 제어: FreeRTOS Critical Section
-- 태스크: `taskENTER_CRITICAL()` / `taskEXIT_CRITICAL()`
-- ISR: `taskENTER_CRITICAL_FROM_ISR()` / `taskEXIT_CRITICAL_FROM_ISR()`
-- 뮤텍스는 ISR에서 쓸 수 없고 우선순위 역전 위험이 있어 쓰지 않는다.
-- **제약:** `configMAX_SYSCALL_INTERRUPT_PRIORITY`보다 우선순위가 높은 ISR에서는 uBroker API를 호출할 수 없다.
+### D2. 동시성 제어: 토픽 잠금 (포트별)
+- `ubroker.c`는 포트 함수 `ubk_port_lock(id)` / `ubk_port_unlock(id)`로 토픽을 잠근다 (D9).
+- FreeRTOS: Critical Section
+  - 태스크: `taskENTER_CRITICAL()` / `taskEXIT_CRITICAL()`
+  - ISR: `taskENTER_CRITICAL_FROM_ISR()` / `taskEXIT_CRITICAL_FROM_ISR()`
+  - 뮤텍스는 ISR에서 쓸 수 없고 우선순위 역전 위험이 있어 쓰지 않는다.
+  - **제약:** `configMAX_SYSCALL_INTERRUPT_PRIORITY`보다 우선순위가 높은 ISR에서는 uBroker API를 호출할 수 없다.
+- POSIX: 토픽마다 `pthread_mutex_t` 1개 (토픽끼리 서로 막지 않음)
+  - 처음 잠글 때 `pthread_once`로 한 번 초기화한다. 정적 배열이라 동적 할당은 없다.
+  - `UBK_CFG_POSIX_PRIO_INHERIT=1`이면 우선순위 상속 mutex를 쓴다 (기본 0, 플랫폼 지원이 다르므로 옵션).
+  - mutex 초기화·잠금 실패는 `UBK_ERR_OS` / `UBK_EVT_ERR_OS`로 알린다.
 
 ### D3. 갱신 판별: 구독 커서 `ubk_sub_t` + 이벤트 (v0.4)
-- 브로커는 토픽마다 발행 순번 `seq`(uint32)를 토픽 상태 테이블에 둔다.
-  - `0` = 초기화 후 한 번도 발행되지 않음
-  - 발행할 때마다 1 증가하고, 순환 시 0은 건너뛴다 (`0xFFFFFFFF → 1`).
+- 브로커는 토픽마다 마지막 발행 순번 `seq`(uint32)와 유효 플래그 `has_data`를 토픽 상태 테이블에 둔다 (v1.0).
+  - 첫 발행의 순번은 `0`이고, 발행할 때마다 1 증가하며 `0xFFFFFFFF → 0`으로 순환한다. **0도 유효한 순번이다.**
+  - "아직 발행 안 됨"은 순번 값이 아니라 `has_data == false`로 나타낸다.
 - 구독자는 토픽마다 커서 `ubk_sub_t`를 하나 갖고 `UBK_SUB_INITIALIZER`로 초기화한다.
   - `topic`: 첫 subscribe 때 그 토픽에 연결된다. 다른 토픽에 쓰면 `UBK_EVT_ERR_TOPIC`이고 아무것도 바꾸지 않는다.
-  - `seq`: 마지막으로 받은 순번. 브로커 순번과 다르면 새 데이터다.
-  - `n_lost`: 이번 호출에서 놓친 발행 횟수 (첫 수신은 0).
+  - `seq` + `is_valid`: 마지막으로 받은 순번과 그 값의 유효 여부 (`is_valid == false`면 아직 받은 것 없음).
+  - `n_lost`: 이번 메시지 전에 읽지 못하고 덮어써진 개수 (첫 수신은 0).
+  - `n_pending`: 이번 메시지 뒤에 아직 남은 개수 (`# QUEUE` 토픽, v1.0).
   - `event`: 이번 호출 결과.
 
 | event | 의미 | `p_msg` |
@@ -87,7 +95,9 @@ uBroker는 FreeRTOS 기반 임베디드 시스템을 위한 **정적 할당 Pub/
 | `UBK_EVT_NEW` | 새 메시지, 놓친 것 없음 | 복사됨 |
 | `UBK_EVT_NEW_LOST` | 새 메시지, 중간에 `n_lost`개 놓침 | 복사됨 |
 | `UBK_EVT_ERR_NULL` | `p_msg`가 NULL | - |
-| `UBK_EVT_ERR_TOPIC` | 다른 토픽에 연결된 커서 | 그대로 |
+| `UBK_EVT_ERR_SIZE` | `size`가 토픽 메시지 크기와 다름 | 그대로 |
+| `UBK_EVT_ERR_TOPIC` | 잘못된 토픽 ID, 또는 다른 토픽에 연결된 커서 | 그대로 |
+| `UBK_EVT_ERR_OS` | POSIX: 토픽 mutex를 잠그지 못함 (v0.9) | 그대로 |
 
 - `p_sub`가 NULL이면 결과를 기록할 곳이 없으므로 아무 동작도 하지 않는다.
 
@@ -96,14 +106,16 @@ uBroker는 FreeRTOS 기반 임베디드 시스템을 위한 **정적 할당 Pub/
 - v0.1~v0.3: 순번을 메시지 구조체에 내장했다 (`_heartbeat` → `_seq` → `ubk_seq`, 맨 아래). 별도 구독 객체보다 사용이 간단하다는 이유였다.
 - 드러난 문제: nested 메시지마다 무의미한 순번(4B)이 들어감, 같은 변수로 여러 토픽을 받거나 init/대입하면 오판, 발행 측에는 쓸모없는 필드, 외부 전송 시 내부 값이 섞임, 사용자가 수정 가능.
 - v0.4 결정: 순번을 구조체에서 빼고 범용 커서로 옮겼다. subscribe는 반환값이 없고, 결과는 커서의 `event`/`n_lost`로 전달한다 (`_with_lost` 함수는 통합되어 삭제).
+- v1.0 결정: 순번 0을 "미발행"으로 예약하던 방식을 없애고, 토픽에는 `has_data`, 커서에는 `is_valid` 플래그를 두었다. 순환 때 0을 건너뛰면 큐 칸 순서(`seq % N`)가 끊기기 때문이다.
 
 ### D4. 발행자 제한: advertise 발행 핸들
 - 이름 (v0.8): 구독 쪽 `ubk_sub_t`와 짝을 맞춰 `ubk_token_t`를 `ubk_pub_t`로 바꿨다 (`UBK_PUB_INVALID`, `UBK_ERR_INVALID_PUB`). 값과 동작은 같다.
 - `ubk_advertise(id, &pub)`은 토픽당 **한 번만** 성공하고 발행 핸들(`ubk_pub_t`)을 준다. 두 번째 호출은 `UBK_ERR_ALREADY_ADVERTISED`를 반환한다.
 - `ubk_publish(id, pub, ...)`는 발행 핸들이 그 토픽의 것이 아니면 `UBK_ERR_INVALID_PUB`을 반환한다.
 - 디버그 옵션 `UBK_CFG_CHECK_PUBLISHER_TASK=1`:
-  - advertise한 태스크를 기록하고, 다른 태스크가 publish하면 `UBK_ERR_WRONG_TASK`를 반환한다.
-  - 스케줄러 시작 전(태스크 핸들 없음)에 advertise하면 검사하지 않는다 (ISR 발행자용).
+  - advertise한 태스크/스레드를 기록하고, 다른 태스크/스레드가 publish하면 `UBK_ERR_WRONG_TASK`를 반환한다.
+  - FreeRTOS: 스케줄러 시작 전(태스크 핸들 없음)에 advertise하면 검사하지 않는다 (ISR 발행자용).
+  - POSIX: `pthread_self()`를 기록하고 `pthread_equal()`로 비교한다.
 
 ### D5. 다중 인스턴스: `# TOPICS` 지시어 (uORB 방식)
 - `# TOPICS sensor_imu0 sensor_imu1`이라고 쓰면 구조체 `sensor_imu_t` 하나에 토픽 ID `UBK_TOPIC_SENSOR_IMU0`, `UBK_TOPIC_SENSOR_IMU1`이 생성된다.
@@ -119,7 +131,7 @@ uBroker는 FreeRTOS 기반 임베디드 시스템을 위한 **정적 할당 Pub/
   - 끝은 `UBK_TOPIC_COUNT` (유효 범위 `1 ~ UBK_TOPIC_COUNT - 1`)
 - 테이블 (배열 크기 `UBK_TOPIC_COUNT`, [0]은 무효 자리)
   - `g_ubk_topic_meta[]` (const, ROM, 생성 파일 `ubk_msgs.c`): 공유 메모리 주소, 기본값 주소, 메시지 크기, 토픽 키(발행 핸들 값)
-  - `s_topic_state[]` (RAM, 고정 파일 `ubroker.c` 내부 static): 발행 순번, advertise 여부, (옵션) 발행 태스크
+  - `s_topic_state[]` (RAM, 고정 파일 `ubroker.c` 내부 static): 마지막 발행 순번, 보관 개수, `has_data`, advertise 여부, (옵션) 발행 태스크
   - [0] 자리 낭비는 ROM 16바이트 + RAM 8바이트(32bit 기준)이며, 인덱스 보정 없이 ID로 바로 접근하기 위해 감수한다.
 - 타입 안전: `void *`로 받으므로 컴파일러가 타입을 검사하지 않는다. 대신 호출자가 `sizeof(변수)`를 넘기고 브로커가 토픽 메시지 크기와 비교한다 (`UBK_ERR_SIZE` / `UBK_EVT_ERR_SIZE`). **크기가 같은 다른 타입은 잡지 못한다.**
 - 잘못된 ID(`UBK_TOPIC_INVALID`, `UBK_TOPIC_COUNT` 이상)는 `UBK_ERR_INVALID_TOPIC` / `UBK_EVT_ERR_TOPIC`.
@@ -130,11 +142,48 @@ uBroker는 FreeRTOS 기반 임베디드 시스템을 위한 **정적 할당 Pub/
 |---|---|---|
 | 고정 (`core/`) | `ubk_types.h` | 결과 코드, 발행 핸들, 구독 커서, 이벤트, 토픽 정보 타입 `ubk_topic_meta_t`, 설정 매크로 |
 | 고정 (`core/`) | `ubroker.h` / `ubroker.c` | 공통 API 선언/구현, 토픽 상태 테이블 |
+| 고정 (`core/`) | `ubk_port*.h`, `ubk_port_posix.c` | OS 포트 (D9) |
 | 생성 | `<msg>.h` | 구조체, 상수, 초기화자 |
 | 생성 | `ubk_msgs.h` / `ubk_msgs.c` | 메시지 헤더 묶음, 토픽 ID, 기본값, 공유 메모리, 토픽 정보 테이블 |
 
   - 의존 방향: `ubroker.c` → `ubroker.h` → `ubk_msgs.h`(생성) → `<msg>.h`(생성) → `ubk_types.h`. 생성 파일은 `ubroker.*`를 참조하지 않는다.
 - 메시지별 초기화 함수(`ubk_init_<msg>_msg`)는 없앴다. `<MSG>_INITIALIZER`로 선언 시 초기화하고, 다시 초기화할 때는 `x = (<msg>_t)<MSG>_INITIALIZER;`를 쓴다.
+
+### D9. OS 포트 계층 (v0.9)
+- 목적: FreeRTOS를 유지하면서 POSIX를 추가한다. API 시그니처는 그대로이므로 사용자 코드는 바뀌지 않는다.
+- 파일 (`core/`, 고정)
+
+| 파일 | 내용 |
+|---|---|
+| `ubk_port.h` | 포트 인터페이스. `UBK_CFG_PORT`에 따라 아래 중 하나를 include |
+| `ubk_port_freertos.h` | Critical Section, `TaskHandle_t` (static inline, 동작은 v0.8과 같음) |
+| `ubk_port_posix.h` / `ubk_port_posix.c` | 토픽별 `pthread_mutex_t`, `pthread_t` |
+
+- 포트가 제공하는 것: `ubk_port_lock`, `ubk_port_unlock`, `ubk_port_owner_t`, `ubk_port_get_self`, `ubk_port_is_self`. FreeRTOS만 `ubk_port_lock_from_isr` / `ubk_port_unlock_from_isr`.
+- 생성 OS 일치 검사: 생성기 `--os`가 `ubk_msgs.h`에 `UBK_GEN_OS`를 쓰고, `ubroker.c`가 `UBK_CFG_PORT`와 다르면 `#error`.
+- `--os posix`에서는 `.msg`의 FreeRTOS 타입(`TickType_t` 등)을 생성 오류로 처리한다. 같은 `.msg`가 두 OS에서 같은 구조체 크기를 갖게 하기 위해서다. 예제 `weapon_state.msg`의 `last_change_tick`은 `uint32`로 바꿨다.
+- ISR 발행 (POSIX)
+  - POSIX에는 ISR이 없다. 가장 가까운 시그널 핸들러에서는 mutex를 쓸 수 없다 (async-signal-safe가 아님).
+  - 결정: `ubk_publish_from_isr`를 `#if (UBK_CFG_PORT == UBK_PORT_FREERTOS)`로 감싸 POSIX 빌드에서는 선언하지 않는다. 잘못된 호출은 빌드 단계에서 드러난다.
+  - 시그널은 핸들러에서 `sem_post`만 하고, 깨어난 스레드가 `ubk_publish`를 호출하는 패턴으로 안내한다 (`test/posix/pub.c`).
+  - 검토 후 채택하지 않은 안
+    - 별칭: POSIX에서도 같은 이름으로 mutex 버전을 둔다. 시그널 핸들러에서 부르면 교착된다.
+    - seqlock: 발행자를 막지 않는 대신 구독자가 읽은 뒤 순번을 비교해 겹쳤으면 다시 읽는다 (재시도 루프). 최악 시간이 정해지지 않아 재시도 상한과 새 이벤트가 필요하고, C11 원자 연산과 메모리 순서 처리로 검증 부담이 크다.
+- 예제·테스트는 OS별로 나눴다: `test/freertos/`, `test/posix/`, 공통 메시지는 `test/msg/`.
+
+### D10. 토픽 큐: `# QUEUE N` (v1.0)
+- 목적: 명령처럼 덮어쓰면 안 되는 비주기 사건을 공유 메모리 구조를 유지한 채 모아 둔다.
+- 토픽 공유 메모리를 N칸 링 버퍼로 둔다. 발행 순번 `seq`의 메시지는 `seq % N`번째 칸에 저장된다.
+  - N은 1 ~ 65536의 2의 거듭제곱으로 제한한다. 2^32가 N의 배수가 되어, 순번이 순환해도 칸 순서가 이어진다.
+  - N = 1이 기존 mailbox다. 같은 구현으로 두 경우를 처리하며, API는 바뀌지 않는다.
+- 발행: 다음 칸에 쓰고, 가득 차면 가장 오래된 칸을 덮어쓴다. **발행자는 기다리지 않는다.**
+- 구독: 호출 한 번에 메시지 하나를 **오래된 것부터(FIFO)** 복사한다.
+  - 새 커서는 남아 있는 가장 오래된 메시지부터 시작한다.
+  - 커서가 N개 이상 뒤처지면 덮어써진 개수를 `n_lost`로 알리고, 남아 있는 가장 오래된 것부터 이어 읽는다.
+  - 남은 개수는 `n_pending`으로 알린다. 큐를 비우려면 `UBK_EVT_NO_NEW`가 나올 때까지 반복 호출한다.
+- 구독자마다 커서가 따로라 모든 구독자가 모든 메시지를 받는다 (방송). 하나만 받아 가는 작업 분배용 큐(FreeRTOS Queue)와는 다르다.
+- 비용: 토픽마다 `N × 메시지 크기`의 RAM. 잠금 시간은 메시지 하나 복사로 mailbox와 같다.
+- 생성: `s_<topic>_data[N]`, 토픽 정보 테이블의 `queue_len`. `ubk_init_topic`은 모든 칸을 기본값으로 채운다.
 
 ### D6. 코드 생성기: Python
 - 메시지 구조체와 토픽 테이블(`<msg>.h`, `ubk_msgs.h/.c`)만 생성한다. 공통 코드(`core/`)는 생성하지 않는다.
@@ -164,6 +213,7 @@ uint8 name : BITS  [DEFAULT]       # 비트필드 (확장 문법)
 msgname  name                      # 중첩 메시지
 # TOPICS topic_a topic_b           # 다중 토픽 (uORB)
 # TYPE_ONLY                        # 자료형 전용, 토픽 없음 (확장)
+# QUEUE N                          # 최근 N개 보관, FIFO (확장, D10)
 ```
 
 ### 4.2 타입
@@ -177,7 +227,7 @@ msgname  name                      # 중첩 메시지
 | `uint32` / `int32` | `uint32_t` / `int32_t` | |
 | `uint64` / `int64` | `uint64_t` / `int64_t` | |
 | `float32` / `float64` | `float` / `double` | NaN/Inf 기본값 불가 |
-| `TickType_t`, `BaseType_t`, `UBaseType_t`, `StackType_t`, `EventBits_t` | 동일 | FreeRTOS 타입. 크기가 포트마다 달라 비트필드 불가, 범위는 부호만 검사 |
+| `TickType_t`, `BaseType_t`, `UBaseType_t`, `StackType_t`, `EventBits_t` | 동일 | FreeRTOS 타입, `--os freertos`에서만 사용 가능. 크기가 포트마다 달라 비트필드 불가, 범위는 부호만 검사 |
 | 다른 `.msg` 이름 | `<name>_t` | 중첩 메시지. 기본값은 중첩 메시지의 기본값 |
 
 ### 4.3 비트필드 (확장)
@@ -218,7 +268,7 @@ float32     target_y
 uint8       arm_state   : 2  0      # 기본값 SAFE
 uint8       error_code  : 6
 bool        is_locked        false
-TickType_t  last_change_tick
+uint32      last_change_tick
 ```
 
 ---
@@ -233,10 +283,10 @@ TickType_t  last_change_tick
 | `ubk_result_t ubk_init_topic(ubk_topic_id_t id)` | 발행 전 | 토픽 공유 메모리 초기화. 이미 발행이 시작됐으면 `UBK_ERR_ALREADY_PUBLISHED` |
 | `ubk_result_t ubk_advertise(ubk_topic_id_t id, ubk_pub_t *p_pub)` | 태스크 / 스케줄러 전 | 발행 권한 획득 (1회만 성공) |
 | `ubk_result_t ubk_publish(ubk_topic_id_t id, ubk_pub_t pub, const void *p_msg, size_t size)` | 태스크 | 발행 |
-| `ubk_result_t ubk_publish_from_isr(ubk_topic_id_t id, ubk_pub_t pub, const void *p_msg, size_t size)` | ISR | 발행 |
+| `ubk_result_t ubk_publish_from_isr(ubk_topic_id_t id, ubk_pub_t pub, const void *p_msg, size_t size)` | ISR (FreeRTOS 전용) | 발행 |
 | `void ubk_subscribe(ubk_topic_id_t id, ubk_sub_t *p_sub, void *p_msg, size_t size)` | 태스크 | 새 데이터면 복사. 결과는 `p_sub->event`, `p_sub->n_lost` (D3 참고) |
 
-publish 오류 검사 순서: 토픽 ID → NULL → 크기 → 발행 핸들 → (옵션) 발행 태스크.
+publish 오류 검사 순서: 토픽 ID → NULL → 크기 → 발행 핸들 → (옵션) 발행 태스크 → (POSIX) 잠금 실패 `UBK_ERR_OS`.
 
 생성 매크로:
 - `<MSG>_<CONST>`: 상수
@@ -248,7 +298,7 @@ publish 오류 검사 순서: 토픽 ID → NULL → 크기 → 발행 핸들 �
 ```c
 int main(void) {
     (void)ubk_init_all();                                   /* 1. 공유 메모리 초기화 */
-    (void)ubk_advertise(UBK_TOPIC_SENSOR_IMU0, &s_tok);     /* 2. ISR 발행자는 여기서 권한 획득 */
+    (void)ubk_advertise(UBK_TOPIC_SENSOR_IMU0, &s_pub);     /* 2. ISR 발행자는 여기서 권한 획득 (FreeRTOS) */
     /* 3. 태스크 생성 → vTaskStartScheduler() */
 }
 
@@ -263,7 +313,7 @@ ubk_subscribe(UBK_TOPIC_WEAPON_STATE, &weapon_sub, &weapon, sizeof(weapon));
 if (weapon_sub.event == UBK_EVT_NEW) { /* ... */ }
 ```
 
-전체 예제: `test/pub.c`, `test/sub.c`
+전체 예제: `test/freertos/`, `test/posix/` (각각 `pub.c`, `sub.c`)
 
 ---
 
@@ -272,24 +322,28 @@ if (weapon_sub.event == UBK_EVT_NEW) { /* ... */ }
 ### 6.1 실행
 
 ```
-python code_gen/ubroker_gen.py -i test/msg -o test/gen
+python code_gen/ubroker_gen.py -i test/msg -o test/freertos/gen                # FreeRTOS (기본)
+python code_gen/ubroker_gen.py -i test/msg -o test/posix/gen --os posix       # POSIX
 ```
+
+- `--os freertos|posix`: 대상 OS (기본 `freertos`). 빌드 설정 `UBK_CFG_PORT`와 같아야 한다 (D9).
 
 - `--lang en|ko`: 오류 메시지와 `--help` 언어 (기본 `en`). 생성 코드의 주석은 언어와 관계없이 영문이다.
 
 빌드에 넣을 것:
-- include 경로: `core/`, 생성 폴더(`test/gen/`)
-- 소스: `core/ubroker.c`, `<생성 폴더>/ubk_msgs.c`
+- include 경로: `core/`, 생성 폴더
+- 소스: `core/ubroker.c`, `<생성 폴더>/ubk_msgs.c`, POSIX는 `core/ubk_port_posix.c` 추가
+- 정의: POSIX는 `-DUBK_CFG_PORT=UBK_PORT_POSIX -pthread -D_POSIX_C_SOURCE=200809L`
 
 ### 6.2 출력 파일
 
 | 파일 | 내용 |
 |---|---|
 | `<msg>.h` | 구조체, 상수, 초기화자 (함수 없음) |
-| `ubk_msgs.h` | 메시지 헤더 묶음, 토픽 ID `ubk_topic_id_t`, 토픽 정보 테이블 선언 |
+| `ubk_msgs.h` | 메시지 헤더 묶음, 대상 OS `UBK_GEN_OS`, 토픽 ID `ubk_topic_id_t`, 토픽 정보 테이블 선언 |
 | `ubk_msgs.c` | 기본값, 공유 메모리, 토픽 정보 테이블 `g_ubk_topic_meta[]` |
 
-`core/`의 `ubk_types.h`, `ubroker.h`, `ubroker.c`는 생성하지 않는다 (D8 참고).
+`core/`의 파일(`ubk_types.h`, `ubroker.h/.c`, `ubk_port*`)은 생성하지 않는다 (D8, D9 참고).
 
 ### 6.3 증분 생성
 - "증분 생성"은 **바뀐 것만 다시 만드는 것**을 말한다. 가변 길이 변수와는 관계없다.
@@ -300,7 +354,7 @@ python code_gen/ubroker_gen.py -i test/msg -o test/gen
 - 검증 오류가 있으면 쓰기·삭제를 모두 하지 않는다.
 
 ### 6.4 생성 시 검사 항목
-문법 오류, 필드 없는 메시지, 알 수 없는 타입, 이름 중복, 예약 이름, 기본값 형식·범위, 배열 기본값 개수, 비트필드 타입·폭·채움, 중첩 메시지 순환 참조, 토픽 이름 중복, `TYPE_ONLY`/`TOPICS` 동시 사용
+문법 오류, 필드 없는 메시지, 알 수 없는 타입, 이름 중복, 예약 이름, 기본값 형식·범위, 배열 기본값 개수, 비트필드 타입·폭·채움, 중첩 메시지 순환 참조, 토픽 이름 중복, `TYPE_ONLY`/`TOPICS`·`QUEUE` 동시 사용, `QUEUE N` 값(1 ~ 65536의 2의 거듭제곱)·중복, `--os posix`에서 FreeRTOS 타입 사용
 
 ---
 
@@ -321,7 +375,7 @@ uBroker 생성 코드는 **제2장(주석·명명)과 제3장(C/C++ 공통 46개
 | 2장 2.나 함수명 "동사 + 명사" | `ubk_init_topic`, `prv_write_topic`, `prv_check_publish` 등. 공통 API(`ubk_advertise`/`ubk_publish`/`ubk_subscribe`)는 대상(토픽)을 인자로 받는다 |
 | 2장 2.다 변수명 | 생성 코드 내부의 static 변수 `s_`, 포인터 인자 `p_`, 횟수 변수 `n_` 접두어. `.msg` 필드 이름은 작성한 그대로 쓰며, 첫 글자 문자·31자 이하만 생성기가 검사 |
 | 2장 2.라 매크로명 | 대문자와 `_`만 사용, `_`로 시작하는 이름 없음 |
-| 3장 1.사 #if 매크로 사전 정의 | `UBK_CFG_CHECK_PUBLISHER_TASK`를 `#ifndef`로 기본값 정의 |
+| 3장 1.사 #if 매크로 사전 정의 | `UBK_CFG_PORT`, `UBK_CFG_CHECK_PUBLISHER_TASK`, `UBK_CFG_POSIX_PRIO_INHERIT`를 `#ifndef`로 기본값 정의 |
 | 3장 1.자 Exit Point 1개 | 모든 함수의 `return` 1개 |
 | 3장 1.카 한 줄에 한 명령문 | 적용 |
 | 3장 1.타 else if 뒤 else | 모든 `else if`에 `else` |
@@ -341,25 +395,30 @@ uBroker 생성 코드는 **제2장(주석·명명)과 제3장(C/C++ 공통 46개
 ### 7.4 SCR-G 제3장에는 없으나 MISRA-C 적용 시 검토할 항목
 - `uint8_t` 비트필드 (MISRA-C:2012 Rule 6.1, 구현 정의)
 - `#pragma pack` (컴파일러 확장, Rule 1.2)
-- 부호 없는 정수 순환(`seq + 1U`)은 의도된 동작이며 주석으로 명시함
+- 부호 없는 정수 순환(`seq + 1U`, `seq - n_stored`)은 의도된 동작이며 주석으로 명시함
+- 큐 칸 주소 계산을 위한 `void *` → `uint8_t *` 변환 (Rule 11.5)
 - `void *` 메시지 인자와 `memcpy` (Rule 11.5 등): 크기 검사로 보완
 - `uint32_t` → `ubk_topic_id_t` 변환 (`ubk_init_all` 반복문, Rule 10.5)
+- POSIX 포트: `pthread_*` 반환값은 검사해 `UBK_ERR_OS`로 알리며, `pthread_mutex_unlock`·`pthread_mutexattr_destroy`의 반환값은 `(void)`로 무시함 (Rule 17.7)
+- `static inline` 함수 (FreeRTOS 포트 헤더), `pthread_mutexattr_t`는 불투명 타입이라 선언 시 초기화하지 않고 `pthread_mutexattr_init`으로 초기화
 
 ### 7.5 사용자 코드에 대한 안내
-- 예제(`test/pub.c`, `test/sub.c`)는 변수 접두어와 매직 넘버 매크로화를 적용했다.
+- 예제(`test/freertos/`, `test/posix/`의 `pub.c`, `sub.c`)는 변수 접두어와 매직 넘버 매크로화를 적용했다.
 - `.msg` 필드 이름이 2장 2.다(첫 글자 문자, 31자 이하)를 어기면 생성기가 오류를 낸다.
 
 ## 8. 한계와 성능 특성
 
 | 항목 | 내용 |
 |---|---|
-| 인터럽트 차단 시간 | publish/subscribe 1회당 메시지 크기에 비례한다 (구조체 복사). 큰 메시지(수백 바이트 이상)는 지연을 측정한 뒤 사용한다. uORB도 같은 구조다. |
+| 인터럽트 차단 / 잠금 시간 | publish/subscribe 1회당 메시지 크기에 비례한다 (잠근 채 구조체 복사). 큰 메시지(수백 바이트 이상)는 지연을 측정한 뒤 사용한다. uORB도 같은 구조다. |
 | 구독자 수의 영향 | 브로커 메모리와 publish 비용은 O(1)이다. 다만 구독 호출마다 Critical Section에 들어가므로, 시스템 전체의 인터럽트 차단 시간은 구독 호출 횟수에 비례한다. 구독자의 로컬 사본 메모리도 구독자 수만큼 필요하다. |
 | Stale 감지 | 없음. 발행자가 멈추면 구독자는 마지막 값을 계속 사용한다. |
 | 커서 보호 | 사용자 코드가 커서 멤버를 수정하는 것은 막을 수 없다 (읽기 전용으로 사용). `p_sub`가 NULL이면 결과를 알릴 수 없다. |
 | 놓친 횟수 | 2^32 - 1회 이상 놓치면 정확하지 않다 (실사용상 무시 가능). |
+| 큐 넘침 | `# QUEUE N` 토픽에서 구독자가 N개 넘게 뒤처지면 오래된 메시지는 덮어써진다. 발행자는 막히지 않고, 구독자는 `n_lost`로 안다. N은 최악의 발행 폭주 개수 이상으로 잡는다. |
 | 타입 검사 | 컴파일 시점 검사 없음. 크기 검사만 하므로 크기가 같은 다른 메시지를 넘기면 잡지 못한다. 토픽 ID와 변수 타입을 맞추는 것은 사용자 책임 (uORB와 같음). |
-| 멀티코어 | 미지원. |
+| 멀티코어 | FreeRTOS 포트 미지원, POSIX 포트 지원. |
+| 우선순위 역전 (POSIX) | `UBK_CFG_POSIX_PRIO_INHERIT=1`이 아니면 토픽 mutex를 잡은 낮은 우선순위 스레드가 높은 우선순위 스레드를 지연시킬 수 있다. |
 
 ---
 
@@ -369,5 +428,6 @@ uBroker 생성 코드는 **제2장(주석·명명)과 제3장(C/C++ 공통 46개
 2. 정적 분석 도구로 생성 코드의 SCR-G 위반 여부 확인
 3. 대상 MCU와 컴파일러에서 메시지 크기별 Critical Section 시간 측정
 4. 대상 컴파일러에서 `#pragma pack` + 비트필드 배치 확인
-5. 멀티코어(SMP) 대응 방식 결정
-6. 실제 타깃(FreeRTOS)에서 통합 시험 (호스트 단위 시험은 `test/host/`에 있음, README '테스트' 참고)
+5. FreeRTOS SMP 대응 방식 결정 (POSIX 포트는 멀티코어 지원)
+6. 실제 타깃(FreeRTOS)에서 통합 시험 (호스트 단위 시험은 `test/freertos/host/`, `docs/testing.md` 참고)
+7. POSIX 테스트(`test/posix/posix_test.c`)를 Linux에서 실행·ThreadSanitizer 검사 (작성 환경에 pthread가 없어 컴파일 검사만 함)

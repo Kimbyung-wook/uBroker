@@ -7,13 +7,14 @@
 ## 실행
 
 ```
-python code_gen/ubroker_gen.py -i <msg 폴더> -o <출력 폴더> [--lang en|ko]
+python code_gen/ubroker_gen.py -i <msg 폴더> -o <출력 폴더> [--os freertos|posix] [--lang en|ko]
 ```
 
 | 옵션 | 설명 |
 |---|---|
 | `-i`, `--input` | `.msg` 파일이 있는 폴더 (필수) |
 | `-o`, `--output` | 생성 파일을 저장할 폴더 (없으면 만듦, 필수) |
+| `--os freertos\|posix` | 대상 OS (기본 `freertos`). `UBK_CFG_PORT`와 같아야 함. `posix`면 `.msg`의 FreeRTOS 타입은 오류이고 `FreeRTOS.h`를 include하지 않음 |
 | `--lang en\|ko` | 오류 메시지와 `--help`의 언어 (기본 `en`). 생성 코드의 주석은 항상 영문 |
 
 종료 코드: 성공 `0`, 오류 `1`
@@ -23,14 +24,17 @@ python code_gen/ubroker_gen.py -i <msg 폴더> -o <출력 폴더> [--lang en|ko]
 | 파일 | 내용 |
 |---|---|
 | `<msg>.h` | 구조체 `<msg>_t`, 상수, `<MSG>_INITIALIZER` |
-| `ubk_msgs.h` | 모든 메시지 헤더 include, 토픽 ID `ubk_topic_id_t`, 토픽 정보 테이블 선언 |
-| `ubk_msgs.c` | 메시지 기본값, 토픽 공유 메모리, 토픽 정보 테이블 `g_ubk_topic_meta[]` |
+| `ubk_msgs.h` | 모든 메시지 헤더 include, 대상 OS `UBK_GEN_OS`, 토픽 ID `ubk_topic_id_t`, 토픽 정보 테이블 선언 |
+| `ubk_msgs.c` | 메시지 기본값, 토픽 공유 메모리 (`# QUEUE N`이면 N칸), 토픽 정보 테이블 `g_ubk_topic_meta[]` |
 
-`core/`의 `ubk_types.h`, `ubroker.h`, `ubroker.c`는 생성하지 않습니다. 그대로 빌드에 넣으면 됩니다.
+`core/`의 파일은 생성하지 않습니다. 그대로 빌드에 넣으면 됩니다.
+
+`ubroker.c`는 `UBK_GEN_OS`와 `UBK_CFG_PORT`를 비교해, 한 OS용으로 생성한 코드를 다른 OS로 빌드하면 `#error`로 멈춥니다.
 
 빌드 설정:
 - include 경로: `core/`, 출력 폴더
-- 소스: `core/ubroker.c`, `<출력 폴더>/ubk_msgs.c`
+- 소스: `core/ubroker.c`, `<출력 폴더>/ubk_msgs.c`, POSIX는 `core/ubk_port_posix.c` 추가
+- 정의: `UBK_CFG_PORT` (`UBK_PORT_FREERTOS` 기본, 또는 `UBK_PORT_POSIX`)
 
 생성 파일 첫 줄에는 다음 안내가 들어갑니다.
 
@@ -63,7 +67,9 @@ python code_gen/ubroker_gen.py -i <msg 폴더> -o <출력 폴더> [--lang en|ko]
 - 기본값 형식과 범위, 배열 기본값 개수
 - 비트필드 타입·폭·채움
 - 이름 규칙: snake_case, 첫 글자, 31자 제한, C 예약어, `ubk_` 접두어, 예약 이름, 중복
-- 토픽 이름 중복, `TYPE_ONLY`와 `TOPICS` 동시 사용
+- 토픽 이름 중복, `TYPE_ONLY`와 `TOPICS`·`QUEUE` 동시 사용
+- `QUEUE N`이 1 ~ 65536 사이의 2의 거듭제곱이 아니거나 두 번 지정됨
+- `--os posix`에서 FreeRTOS 타입 사용
 
 예 (`--lang ko`):
 

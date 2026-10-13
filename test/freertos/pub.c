@@ -34,7 +34,7 @@ void WeaponControlTask(void *p_params)
         state.target_y = 2.0F;
         state.arm_state = WEAPON_STATE_ARM_STATE_ARMED;
         state.is_locked = true;
-        state.last_change_tick = xTaskGetTickCount();
+        state.last_change_tick = (uint32_t)xTaskGetTickCount();
 
         /* 3. Publish (UBK_ERR_SIZE if size differs from the topic message size) */
         (void)ubk_publish(UBK_TOPIC_WEAPON_STATE, pub, &state, sizeof(state));

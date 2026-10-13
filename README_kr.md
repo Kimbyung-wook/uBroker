@@ -4,21 +4,24 @@
 
 ## 1. 개요
 
-uBroker는 FreeRTOS용 **정적 할당 Pub/Sub 메시지 브로커**이며, `.msg` 파일로 C 코드를 만드는 **Python 생성기**를 함께 제공합니다.
+uBroker는 FreeRTOS와 POSIX용 **정적 할당 Pub/Sub 메시지 브로커**이며, `.msg` 파일로 C 코드를 만드는 **Python 생성기**를 함께 제공합니다.
 
 - 동적 할당 없음: 토픽마다 정적 공유 메모리 1개 (Mailbox, 최신값만 유지)
 - 구독자 수 무제한: 브로커가 구독자 목록을 갖지 않음 (O(1))
-- Non-blocking 수신(이벤트, 놓친 횟수), ISR 발행, 토픽당 발행자 1개
+- Non-blocking 수신(이벤트, 놓친 횟수), 토픽당 발행자 1개
+- 명령 같은 사건을 위한 토픽별 FIFO 큐 (`# QUEUE N`, 선택)
+- FreeRTOS(Critical Section, ISR 발행) 또는 POSIX(토픽별 pthread mutex)를 설정 하나로 선택
 
 참고: 코드 구조는 [**uMsg**](https://github.com/amcolex/umsg)를, 메시지 문법과 동작 방식은 [**PX4 uORB**](https://docs.px4.io/main/en/middleware/uorb.html)를 참고했습니다.
 
 ## 2. 폴더 구조
 
 ```
-core/        브로커 고정 소스 (생성하지 않음): ubk_types.h, ubroker.h, ubroker.c
+core/        브로커 고정 소스 (생성하지 않음): ubk_types.h, ubroker.h/.c, OS 포트 (ubk_port*)
 code_gen/    코드 생성기: ubroker_gen.py
-test/        예제 메시지(msg/), 생성 코드(gen/), 예제, 호스트 테스트(host/)
+test/        공통 메시지(msg/), FreeRTOS 예제·테스트(freertos/), POSIX 예제·테스트(posix/)
 docs/        상세 문서
+tools/       기존 코드 전환 도구: tools/migrate/
 ref/         참고 문서 (코딩 규칙)
 ```
 
@@ -35,6 +38,7 @@ flowchart LR
         UH["ubroker.h"]
         UC["ubroker.c"]
         UT["ubk_types.h"]
+        UP["ubk_port.h<br/>ubk_port_freertos.h / ubk_port_posix.h(.c)"]
     end
     subgraph GEN["gen/ (생성)"]
         MH["ubk_msgs.h"]
@@ -49,28 +53,29 @@ flowchart LR
     MH --> XH
     XH --> UT
     MC --> MH
+    UC --> UP
     UC -. "g_ubk_topic_meta[]" .-> MC
 ```
 
-사용자 코드는 `ubroker.h`만 include합니다. 생성 파일은 `ubroker.*`를 참조하지 않습니다.
+사용자 코드는 `ubroker.h`만 include합니다. 생성 파일은 `ubroker.*`를 참조하지 않습니다. OS 포트는 `ubroker.c`만 사용합니다.
 
 ## 4. 사용 방법
 
 ```mermaid
 flowchart TD
-    A["1. 메시지 정의<br/>msg/*.msg"] --> B["2. 코드 생성<br/>ubroker_gen.py -i msg -o gen"]
-    B --> C["3. 빌드 설정<br/>include: core/, gen/<br/>소스: ubroker.c, ubk_msgs.c"]
+    A["1. 메시지 정의<br/>msg/*.msg"] --> B["2. 코드 생성<br/>ubroker_gen.py -i msg -o gen --os freertos|posix"]
+    B --> C["3. 빌드 설정<br/>include: core/, gen/<br/>소스: ubroker.c, ubk_msgs.c (+ ubk_port_posix.c)<br/>UBK_CFG_PORT = 같은 OS"]
     C --> D["4. 초기화<br/>ubk_init_all()"]
     D --> P1
     D --> S1
-    subgraph PUB["발행 태스크 / ISR"]
+    subgraph PUB["발행 태스크 / 스레드"]
         P1["ubk_advertise(id, &pub)"] --> P2["ubk_publish(id, pub, &msg, sizeof(msg))"]
     end
-    subgraph SUB["구독 태스크"]
+    subgraph SUB["구독 태스크 / 스레드"]
         S1["ubk_sub_t sub = UBK_SUB_INITIALIZER"] --> S2["ubk_subscribe(id, &sub, &msg, sizeof(msg))"]
         S2 --> S3{"sub.event"}
     end
-    P2 --> E["5. 실행<br/>vTaskStartScheduler()"]
+    P2 --> E["5. 실행<br/>vTaskStartScheduler() / pthread_create()"]
     S3 --> E
 ```
 
@@ -91,13 +96,15 @@ ubk_subscribe(UBK_TOPIC_WEAPON_STATE, &sub, &weapon, sizeof(weapon)); // 새 메
 if (sub.event == UBK_EVT_NEW) { }                       // 새 메시지일 때 처리, 아니면 weapon 은 직전 값 유지
 ```
 
-전체 예제: [`test/pub.c`](test/pub.c), [`test/sub.c`](test/sub.c) · 메시지 문법: [`docs/msg_syntax_kr.md`](docs/msg_syntax_kr.md)
+전체 예제: FreeRTOS [`test/freertos/`](test/freertos), POSIX [`test/posix/`](test/posix) · 메시지 문법: [`docs/msg_syntax_kr.md`](docs/msg_syntax_kr.md)
 
 ## 5. 코드 생성 방법
 
 ```
-python code_gen/ubroker_gen.py -i <msg 폴더> -o <출력 폴더> [--lang en|ko]
+python code_gen/ubroker_gen.py -i <msg 폴더> -o <출력 폴더> [--os freertos|posix] [--lang en|ko]
 ```
+
+`--os`(기본 `freertos`)는 빌드 설정 `UBK_CFG_PORT`(`UBK_PORT_FREERTOS` / `UBK_PORT_POSIX`)와 같아야 합니다. 다르면 빌드가 `#error`로 멈춥니다.
 
 | 생성 파일 | 내용 |
 |---|---|
@@ -115,8 +122,8 @@ python code_gen/ubroker_gen.py -i <msg 폴더> -o <출력 폴더> [--lang en|ko]
 | `ubk_init_topic(id)` | 토픽 하나 초기화 (발행 전에만 가능) |
 | `ubk_advertise(id, &pub)` | 발행 권한 획득 (토픽당 1회만 성공) |
 | `ubk_publish(id, pub, &msg, size)` | 태스크에서 발행 |
-| `ubk_publish_from_isr(id, pub, &msg, size)` | ISR에서 발행 |
-| `ubk_subscribe(id, &sub, &msg, size)` | 새 메시지면 복사, 결과는 `sub.event` / `sub.n_lost` |
+| `ubk_publish_from_isr(id, pub, &msg, size)` | ISR에서 발행 (FreeRTOS 전용) |
+| `ubk_subscribe(id, &sub, &msg, size)` | 다음 메시지 복사 (오래된 것부터), 결과는 `sub.event`, `sub.n_lost`, `sub.n_pending` |
 
 | `sub.event` | 의미 |
 |---|---|
@@ -124,9 +131,9 @@ python code_gen/ubroker_gen.py -i <msg 폴더> -o <출력 폴더> [--lang en|ko]
 | `UBK_EVT_NO_NEW` | 새 메시지 없음 (직전 값 유지) |
 | `UBK_EVT_NEW` | 새 메시지 복사됨 |
 | `UBK_EVT_NEW_LOST` | 새 메시지 복사됨, 중간에 `n_lost`개 놓침 |
-| `UBK_EVT_ERR_*` | 오류 (`NULL`, `SIZE`, `TOPIC`) |
+| `UBK_EVT_ERR_*` | 오류 (`NULL`, `SIZE`, `TOPIC`, `OS`) |
 
-상세: [`docs/api_kr.md`](docs/api_kr.md) · 설정과 한계: [`docs/configuration_kr.md`](docs/configuration_kr.md) · 테스트: [`docs/testing_kr.md`](docs/testing_kr.md) · 설계: [`uBroker_design.md`](uBroker_design.md)
+상세: [`docs/api_kr.md`](docs/api_kr.md) · 설정과 한계: [`docs/configuration_kr.md`](docs/configuration_kr.md) · 테스트: [`docs/testing_kr.md`](docs/testing_kr.md) · 기존 코드 전환: [`docs/migration_kr.md`](docs/migration_kr.md) · 설계: [`uBroker_design.md`](uBroker_design.md)
 
 ---
 

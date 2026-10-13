@@ -16,6 +16,7 @@ uint8 name : BITS  [DEFAULT]       # bitfield (extension)
 msgname  name                      # nested message
 # TOPICS topic_a topic_b           # several topics with one struct (uORB)
 # TYPE_ONLY                        # type only, no topic (extension)
+# QUEUE N                          # keep the last N messages, FIFO (extension)
 ```
 
 - A `#` after a field becomes the field comment in the generated header.
@@ -32,7 +33,7 @@ msgname  name                      # nested message
 | `uint32` / `int32` | `uint32_t` / `int32_t` | |
 | `uint64` / `int64` | `uint64_t` / `int64_t` | |
 | `float32` / `float64` | `float` / `double` | NaN/Inf defaults not allowed |
-| `TickType_t`, `BaseType_t`, `UBaseType_t`, `StackType_t`, `EventBits_t` | same | FreeRTOS types. Size depends on the port: no bitfields, sign-only range check |
+| `TickType_t`, `BaseType_t`, `UBaseType_t`, `StackType_t`, `EventBits_t` | same | FreeRTOS types, only with `--os freertos`. Size depends on the port: no bitfields, sign-only range check |
 | another `.msg` name | `<name>_t` | nested message. Its default is the nested message's default |
 
 ## Constants
@@ -68,7 +69,8 @@ uint8 reserved      : 2      # without this line: error (6/8 bits)
 
 - No directive: one topic named after the message (`UBK_TOPIC_<MSG>`).
 - `# TOPICS a b`: one struct, topics `UBK_TOPIC_A`, `UBK_TOPIC_B` (multi-instance).
-- `# TYPE_ONLY`: for messages used only as field types (e.g. `vector3`). Generates the struct, constants and initializer only. No topic ID, shared memory or table entry. Cannot be combined with `# TOPICS`.
+- `# QUEUE N`: the topic keeps the last N messages instead of only the latest one. Subscribers read them oldest first (FIFO), each subscriber independently. N must be a power of 2 between 1 and 65536 (default 1 = mailbox). Memory: N × message size per topic. Applies to every topic of the message. Use it for events that must not be overwritten, such as commands.
+- `# TYPE_ONLY`: for messages used only as field types (e.g. `vector3`). Generates the struct, constants and initializer only. No topic ID, shared memory or table entry. Cannot be combined with `# TOPICS` or `# QUEUE`.
 
 ## Naming Rules
 
@@ -92,7 +94,7 @@ float32     target_y
 uint8       arm_state   : 2  0      # ARM_STATE_* (default: SAFE)
 uint8       error_code  : 6
 bool        is_locked        false
-TickType_t  last_change_tick        # FreeRTOS tick of the last state change
+uint32      last_change_tick        # OS tick of the last state change
 ```
 
 More examples: [`test/msg/`](../test/msg)

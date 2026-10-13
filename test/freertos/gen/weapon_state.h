@@ -4,7 +4,6 @@
 #define UBK_WEAPON_STATE_H
 
 #include "ubk_types.h"
-#include "FreeRTOS.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -25,7 +24,7 @@ typedef struct
     uint8_t arm_state : 2;                   /* ARM_STATE_* (default: SAFE) */
     uint8_t error_code : 6;
     bool is_locked;
-    TickType_t last_change_tick;             /* FreeRTOS tick of the last state change */
+    uint32_t last_change_tick;               /* OS tick of the last state change */
 } weapon_state_t;
 #pragma pack(pop)
 
@@ -37,7 +36,7 @@ typedef struct
         .arm_state = 0U, \
         .error_code = 0U, \
         .is_locked = false, \
-        .last_change_tick = ((TickType_t)0U) \
+        .last_change_tick = 0U \
     }
 
 #ifdef __cplusplus

@@ -7,13 +7,14 @@ English | [한국어](generator_kr.md)
 ## Usage
 
 ```
-python code_gen/ubroker_gen.py -i <msg dir> -o <output dir> [--lang en|ko]
+python code_gen/ubroker_gen.py -i <msg dir> -o <output dir> [--os freertos|posix] [--lang en|ko]
 ```
 
 | Option | Description |
 |---|---|
 | `-i`, `--input` | Folder with `.msg` files (required) |
 | `-o`, `--output` | Folder for generated files (created if missing, required) |
+| `--os freertos\|posix` | Target OS (default `freertos`). Must match `UBK_CFG_PORT`. With `posix`, FreeRTOS types in `.msg` are errors and `FreeRTOS.h` is not included |
 | `--lang en\|ko` | Language of error messages and `--help` (default `en`). Generated code comments are always English |
 
 Exit code: `0` on success, `1` on any error.
@@ -23,14 +24,17 @@ Exit code: `0` on success, `1` on any error.
 | File | Contents |
 |---|---|
 | `<msg>.h` | Struct `<msg>_t`, constants, `<MSG>_INITIALIZER` |
-| `ubk_msgs.h` | Includes all message headers, topic IDs `ubk_topic_id_t`, declaration of the topic info table |
-| `ubk_msgs.c` | Message defaults, topic shared memory, topic info table `g_ubk_topic_meta[]` |
+| `ubk_msgs.h` | Includes all message headers, target OS `UBK_GEN_OS`, topic IDs `ubk_topic_id_t`, declaration of the topic info table |
+| `ubk_msgs.c` | Message defaults, topic shared memory (`N` slots for `# QUEUE N`), topic info table `g_ubk_topic_meta[]` |
 
-The files in `core/` (`ubk_types.h`, `ubroker.h`, `ubroker.c`) are not generated. Add them to your build as they are.
+The files in `core/` are not generated. Add them to your build as they are.
+
+`ubroker.c` compares `UBK_GEN_OS` with `UBK_CFG_PORT` and stops with `#error` if code generated for one OS is built for the other.
 
 Build setup:
 - include paths: `core/`, the output folder
-- sources: `core/ubroker.c`, `<output>/ubk_msgs.c`
+- sources: `core/ubroker.c`, `<output>/ubk_msgs.c`, and on POSIX `core/ubk_port_posix.c`
+- define: `UBK_CFG_PORT` (`UBK_PORT_FREERTOS` default, or `UBK_PORT_POSIX`)
 
 Every generated file starts with a one-line notice:
 
@@ -63,7 +67,9 @@ All files are checked before anything is written. If there is any error, no file
 - Default value format and range, array default count
 - Bitfield type, width and fill
 - Name rules: snake_case, first letter, 31-character limit, C keywords, `ubk_` prefix, reserved names, duplicates
-- Duplicate topic names, `TYPE_ONLY` used together with `TOPICS`
+- Duplicate topic names, `TYPE_ONLY` used together with `TOPICS` or `QUEUE`
+- `QUEUE N` not a power of 2 between 1 and 65536, or given twice
+- FreeRTOS types with `--os posix`
 
 Example:
 
