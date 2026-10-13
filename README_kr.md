@@ -10,7 +10,7 @@ uBroker는 FreeRTOS용 **정적 할당 Pub/Sub 메시지 브로커**이며, `.ms
 - 구독자 수 무제한: 브로커가 구독자 목록을 갖지 않음 (O(1))
 - Non-blocking 수신(이벤트, 놓친 횟수), ISR 발행, 토픽당 발행자 1개
 
-참고: 코드 구조는 **uMsg**를, 메시지 문법과 동작 방식은 **PX4 uORB**를 참고했습니다.
+참고: 코드 구조는 [**uMsg**](https://github.com/amcolex/umsg)를, 메시지 문법과 동작 방식은 [**PX4 uORB**](https://docs.px4.io/main/en/middleware/uorb.html)를 참고했습니다.
 
 ## 2. 폴더 구조
 

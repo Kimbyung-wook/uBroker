@@ -1,7 +1,7 @@
 # uBroker 요구사항 및 설계 명세 (v0.8)
 
-> `prevWorks.md`(v0.1)를 바탕으로, 검토 결과와 결정사항을 반영해 다시 정리한 문서입니다.
-> 참고 구현: uMsg(코드 구조), PX4 uORB(메시지 문법·동작 방식)
+> 초기 설계안(v0.1)에 검토 결과와 결정사항을 반영해 정리한 문서입니다.
+> 참고 구현: [uMsg](https://github.com/amcolex/umsg)(코드 구조), [PX4 uORB](https://docs.px4.io/main/en/middleware/uorb.html)(메시지 문법·동작 방식)
 > 코딩 규칙: DAPA SCR-G (무기체계 소프트웨어 개발 및 관리 매뉴얼 [부록 6])
 
 ---

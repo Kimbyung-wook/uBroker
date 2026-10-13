@@ -10,7 +10,7 @@ uBroker is a **statically allocated Pub/Sub message broker for FreeRTOS**, with 
 - Unlimited subscribers: the broker keeps no subscriber list (O(1))
 - Non-blocking receive with events and lost-message count, ISR publish, single publisher per topic
 
-References: the code structure is based on **uMsg**, and the message syntax and behavior follow **PX4 uORB**.
+References: the code structure is based on [**uMsg**](https://github.com/amcolex/umsg), and the message syntax and behavior follow [**PX4 uORB**](https://docs.px4.io/main/en/middleware/uorb.html).
 
 ## 2. Folder Structure
 
