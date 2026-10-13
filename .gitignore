@@ -1,3 +1,5 @@
 ref
 works
 tools
+__pycache__
+*.pyc
