@@ -36,6 +36,16 @@ msgname  name                      # nested message
 | `TickType_t`, `BaseType_t`, `UBaseType_t`, `StackType_t`, `EventBits_t` | same | FreeRTOS types, only with `--os freertos`. Size depends on the port: no bitfields, sign-only range check |
 | another `.msg` name | `<name>_t` | nested message. Its default is the nested message's default |
 
+**C type names (extension):** to ease porting existing C structs, the C names can be used anywhere a builtin or nested type is allowed, including constants and bitfields. The generated code is the same.
+
+| C name | Same as |
+|---|---|
+| `uint8_t` ~ `uint64_t`, `int8_t` ~ `int64_t` | `uint8` ~ `uint64`, `int8` ~ `int64` |
+| `float` / `double` | `float32` / `float64` |
+| `<name>_t` | nested message `<name>` |
+
+`int`, `long`, `short` and `unsigned` are not accepted because their size depends on the compiler. Use a fixed-width type.
+
 ## Constants
 
 ```
@@ -56,7 +66,7 @@ uint8 ARM_STATE_ARMED = 1
 
 ## Bitfields (extension)
 
-- Allowed only on `uint8`, `uint16`, `uint32`. Not on arrays, `bool`, or FreeRTOS types.
+- Allowed only on `uint8`, `uint16`, `uint32` (or `uint8_t`, `uint16_t`, `uint32_t`). Not on arrays, `bool`, or FreeRTOS types.
 - **Fill check:** consecutive bitfields of the same type must exactly fill the storage unit (8/16/32 bits). Declare unused bits as a `reserved` field.
 
 ```

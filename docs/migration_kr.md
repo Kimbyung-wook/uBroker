@@ -2,7 +2,9 @@
 
 [English](migration.md) | 한국어
 
-태스크끼리 **전역변수와 FreeRTOS 큐**로 데이터를 주고받는 FreeRTOS 코드를 uBroker로 바꾸는 방법입니다. 전환은 사람이 하고, 반복 작업은 [`tools/migrate/`](../tools/migrate)의 도구가 맡습니다. 도구는 Python 3 표준 라이브러리만 쓰므로 폐쇄망에 그대로 반입할 수 있습니다.
+태스크끼리 **전역변수와 FreeRTOS 큐**로 데이터를 주고받는 FreeRTOS 코드를 uBroker로 바꾸는 방법입니다. 전환은 사람이 하고, 반복 작업은 전환 도구(`tools/migrate/`)가 맡습니다. 도구는 Python 3 표준 라이브러리만 쓰므로 폐쇄망에 그대로 반입할 수 있습니다.
+
+> 전환 도구는 별도로 배포하며, 이 저장소에는 포함되어 있지 않습니다.
 
 ## 절차
 
@@ -127,6 +129,25 @@ UBK_TOPIC_MODE_REQ_CONTROL, UBK_TOPIC_MODE_REQ_COMM      /* '# TOPICS mode_req_c
 /* 후, 방법 B: CommTask 는 요청을 발행, ControlTask 가 mode 를 소유하고 발행 */
 ```
 
+### 주기당 1회 구독
+
+전역변수를 직접 읽던 코드는 필드가 필요한 곳마다 전역변수를 읽는 경우가 많습니다. 이 읽기를 하나하나 `ubk_subscribe` 호출로 바꾸지 않습니다. 호출할 때마다 critical section에 들어가고 메시지 전체를 복사하기 때문입니다. 태스크 주기를 시작할 때 한 번 구독하고, 그 주기의 나머지에서는 로컬 사본을 씁니다.
+
+```c
+/* 피할 것: 필드 접근마다 구독 */
+ubk_subscribe(UBK_TOPIC_SENSOR_DATA, &sub, &s, sizeof(s)); a = s.accel.x;
+ubk_subscribe(UBK_TOPIC_SENSOR_DATA, &sub, &s, sizeof(s)); b = s.accel.y;
+
+/* 권장: 주기마다 한 번 구독, 이후에는 로컬 사본 사용 */
+ubk_subscribe(UBK_TOPIC_SENSOR_DATA, &sub, &s, sizeof(s));
+a = s.accel.x;
+b = s.accel.y;
+```
+
+- 호출 수가 "필드 접근 횟수"가 아니라 "주기당 토픽 수"가 됩니다.
+- 한 주기에서 쓰는 모든 필드가 같은 메시지에서 나오므로 값끼리 일관됩니다.
+- 보조 함수는 토픽을 다시 읽지 않고, 로컬 사본을 인자(`const sensor_data_t *p_s`)로 받습니다.
+
 ## 도구 설명
 
 ### ipc_inventory.py
@@ -154,6 +175,22 @@ UBK_TOPIC_MODE_REQ_CONTROL, UBK_TOPIC_MODE_REQ_COMM      /* '# TOPICS mode_req_c
 - `status`가 `done`(또는 `--status <값>`)인 행을 검사합니다. 주석과 문자열은 무시합니다.
 - 종료 코드는 0이면 남은 참조 없음, 1이면 남은 참조 있음입니다. 빌드 관문으로 쓸 수 있습니다.
 
+### topic_graph.py
+- 이미 uBroker를 쓰는 코드의 토픽 그래프(Pub/Sub Graph, Computation Graph라고도 함)를 그립니다.
+  - 노드: 태스크, ISR, 토픽
+  - 화살표: 발행(노드 -> 토픽), 구독(토픽 -> 노드)
+- 인자가 `UBK_TOPIC_*`인 `ubk_advertise` / `ubk_publish*` / `ubk_subscribe` 호출을 찾고, `ipc_inventory.py`와 같은 호출 그래프로 태스크에 연결합니다.
+- 출력
+  - `<out>.mmd`: Mermaid
+  - `<out>.dot`: Graphviz. `dot -Tsvg <out>.dot -o <out>.svg`로 그림 파일을 만듭니다.
+  - `<out>_n2.csv`: N² 행렬(발행 × 구독). 규모가 클 때 씁니다.
+- `--msg <폴더>`는 큐 길이를 표시하고, `--focus <태스크 또는 토픽>`은 그 주변만 그립니다.
+- 다음도 함께 알려 줍니다.
+  - 구독자나 발행자가 없는 토픽
+  - 발행자가 여럿인 토픽
+  - `.msg`에는 있지만 코드에서 쓰지 않는 토픽
+  - 토픽 ID가 상수가 아닌 호출
+
 ## 검증 체크리스트
 
 - [ ] 통합 기간에는 `UBK_CFG_CHECK_PUBLISHER_TASK=1`로 빌드합니다. 다른 태스크에서 발행하면 `UBK_ERR_WRONG_TASK`가 납니다.
@@ -162,6 +199,7 @@ UBK_TOPIC_MODE_REQ_CONTROL, UBK_TOPIC_MODE_REQ_COMM      /* '# TOPICS mode_req_c
 - [ ] 발행 전에 `ubk_init_all()`을 1회 실행합니다.
 - [ ] QUEUE 토픽은 `n_lost`를 기록합니다. 정상 동작에서는 0이어야 합니다.
 - [ ] 큐에서 대기하던 코드는 알림을 기다리고 토픽을 끝까지 비웁니다.
+- [ ] 각 태스크는 토픽을 주기당 한 번 구독하고, 로컬 사본으로 처리합니다.
 - [ ] `ipc_residual.py`의 남은 참조가 0건입니다.
 - [ ] 타이밍: 전환 전후의 태스크 실행 시간과 인터럽트 지연을 비교합니다(성능 절 참고).
 
@@ -209,6 +247,40 @@ POSIX 포트로 측정했습니다(토픽 300개, 스레드 20~40개, i9-14900HX
   - 하드웨어 카운터나 DMA를 씁니다.
   - 경합하는 토픽의 메시지를 작게 유지합니다.
 
+### 참고 사례
+
+규모가 비슷한 오픈소스 비행 제어 소프트웨어 두 가지와 비교합니다.
+
+**PX4 (uORB, pub/sub)**
+- 규모(소스 코드 정적 집계)
+  - 메시지 정의 232종. 다중 인스턴스 때문에 실행 시 토픽은 더 많습니다.
+  - 발행 지점 약 810곳, 구독 지점 약 1,445곳
+  - 모듈 99개, 독립 태스크 42개
+  - 드라이버와 제어기 대부분은 소수의 work queue 스레드에서 WorkItem으로 실행됩니다.
+- 타깃: Pixhawk 6 계열은 STM32H7(Cortex-M7, 480 MHz)을 씁니다.
+- 잠금: NuttX에서 uORB는 critical section 안에서 메시지를 복사합니다. uBroker FreeRTOS 포트와 같은 방식입니다.
+- 의미: 이 규모와 이 잠금 방식으로 500 MHz 타깃과 비슷한 MCU에서 비행 제어가 동작합니다.
+- 차이: uORB는 발행할 때 기다리는 구독자를 깨웁니다. uBroker에는 이런 콜백이 없으므로 `queue+notify` 방식을 씁니다.
+
+**ArduPilot (ArduCopter)**
+- pub/sub이 아니라, 공유 객체의 **함수를 호출**해서 데이터를 얻습니다(예: `AP::ahrs()`).
+- 메인 스케줄러는 협력형 단일 스레드라서 이 호출에 잠금이 필요 없습니다. 다른 스레드(드라이버 백엔드)와 공유하는 데이터는 세마포어 안에서 복사하며, 비용은 uBroker와 비슷합니다.
+- 여기서는 **태스크 시간 예산**의 참고로만 씁니다.
+- 메인 스케줄러는 태스크 29개(1~400 Hz)이고, 최대 허용 시간은 50~350 µs(대부분 50~130 µs)입니다. 초당 약 1,405회 실행되며, 모든 태스크가 허용 시간을 다 쓰면 CPU의 약 11.6%입니다. 고속 루프(자세 추정·제어)는 이 표에 없습니다.
+
+**이 예산에 대한 uBroker 비용** (500 MHz 추정, 메시지 128 B 이하, 호출당 약 0.5 µs)
+
+| 태스크 1회 실행당 호출 수 | 초당 1,405회 실행 시 합계 | 50 µs 태스크에서 차지하는 비율 |
+|---|---|---|
+| 5회 | 약 3.5 ms/s (CPU 0.35%) | 약 5% |
+| 20회 | 약 14 ms/s (CPU 1.4%) | 약 20% |
+
+- 전체 CPU에서 차지하는 비율은 작습니다.
+- 제약이 되는 것은 가장 짧은 태스크입니다. 다음을 지킵니다.
+  - 주기당 1회 구독합니다("주기당 1회 구독" 절 참고).
+  - 메시지는 256 B 이하로 유지합니다.
+  - 50 µs 태스크에서 1 KB 메시지는 피합니다. 호출 1회가 예산의 5~10%를 차지합니다.
+
 ### 타깃에서 측정하기
 
 - **막히는 시간**
@@ -216,4 +288,4 @@ POSIX 포트로 측정했습니다(토픽 300개, 스레드 20~40개, i9-14900HX
   - 또는 `ubk_port_lock`과 `ubk_port_unlock` 사이의 DWT 사이클 수 최대값을 기록합니다.
 - **전환 전후 비교:** 같은 방법으로 전환 전과 후의 인터럽트 지연과 태스크 실행 시간을 비교합니다.
 
-도구 시험용 샘플: [`tools/migrate/sample/`](../tools/migrate/sample). `expected.csv`는 샘플에서 나와야 하는 목록입니다.
+도구에는 시험용 샘플 코드(`tools/migrate/sample/`)와, 그 샘플에서 나와야 하는 목록(`expected.csv`)이 함께 들어 있습니다.

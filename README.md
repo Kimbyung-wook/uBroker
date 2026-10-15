@@ -21,7 +21,6 @@ core/        Fixed broker sources (not generated): ubk_types.h, ubroker.h/.c, OS
 code_gen/    Code generator: ubroker_gen.py
 test/        Shared messages (msg/), FreeRTOS examples/tests (freertos/), POSIX examples/tests (posix/)
 docs/        Detailed documentation
-tools/       Migration tools for existing code: tools/migrate/
 ref/         Reference documents (coding rules)
 ```
 

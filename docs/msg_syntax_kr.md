@@ -36,6 +36,16 @@ msgname  name                      # 중첩 메시지
 | `TickType_t`, `BaseType_t`, `UBaseType_t`, `StackType_t`, `EventBits_t` | 동일 | FreeRTOS 타입, `--os freertos`에서만 사용 가능. 크기가 포트마다 달라 비트필드 불가, 범위는 부호만 검사 |
 | 다른 `.msg` 이름 | `<name>_t` | 중첩 메시지. 기본값은 중첩 메시지의 기본값 |
 
+**C 타입 이름 (확장):** 기존 C 구조체를 옮기기 쉽도록, 기본 타입이나 중첩 타입을 쓰는 모든 곳(상수, 비트필드 포함)에 C 이름을 쓸 수 있습니다. 생성 코드는 같습니다.
+
+| C 이름 | 같은 타입 |
+|---|---|
+| `uint8_t` ~ `uint64_t`, `int8_t` ~ `int64_t` | `uint8` ~ `uint64`, `int8` ~ `int64` |
+| `float` / `double` | `float32` / `float64` |
+| `<name>_t` | 중첩 메시지 `<name>` |
+
+`int`, `long`, `short`, `unsigned`는 크기가 컴파일러마다 달라 쓸 수 없습니다. 고정 폭 타입을 쓰세요.
+
 ## 상수
 
 ```
@@ -56,7 +66,7 @@ uint8 ARM_STATE_ARMED = 1
 
 ## 비트필드 (확장)
 
-- `uint8`, `uint16`, `uint32`만 허용합니다. 배열, `bool`, FreeRTOS 타입에는 쓸 수 없습니다.
+- `uint8`, `uint16`, `uint32`(또는 `uint8_t`, `uint16_t`, `uint32_t`)만 허용합니다. 배열, `bool`, FreeRTOS 타입에는 쓸 수 없습니다.
 - **채움 검사:** 연속된 같은 타입의 비트필드는 저장 단위(8/16/32 bit)를 **정확히** 채워야 합니다. 남는 비트는 `reserved` 필드로 명시합니다.
 
 ```

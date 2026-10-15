@@ -21,7 +21,6 @@ core/        브로커 고정 소스 (생성하지 않음): ubk_types.h, ubroker
 code_gen/    코드 생성기: ubroker_gen.py
 test/        공통 메시지(msg/), FreeRTOS 예제·테스트(freertos/), POSIX 예제·테스트(posix/)
 docs/        상세 문서
-tools/       기존 코드 전환 도구: tools/migrate/
 ref/         참고 문서 (코딩 규칙)
 ```
 

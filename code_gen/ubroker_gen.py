@@ -84,6 +84,13 @@ BUILTIN_TYPES = {
     "EventBits_t": TypeInfo("EventBits_t", "uint", None, freertos=True),
 }
 
+# C type names accepted as aliases (eases porting existing C structs)
+C_TYPE_ALIASES = {
+    "uint8_t": "uint8", "uint16_t": "uint16", "uint32_t": "uint32", "uint64_t": "uint64",
+    "int8_t": "int8", "int16_t": "int16", "int32_t": "int32", "int64_t": "int64",
+    "float": "float32", "double": "float64",
+}
+
 # Types allowed for bitfields (fixed-width unsigned integers only)
 BITFIELD_TYPES = ("uint8", "uint16", "uint32")
 
@@ -234,7 +241,7 @@ def parse_msg_file(path, errors):
 
             m = RE_CONST.match(body)
             if m:
-                msg.constants.append(Constant(m.group(1), m.group(2), m.group(3).strip(),
+                msg.constants.append(Constant(C_TYPE_ALIASES.get(m.group(1), m.group(1)), m.group(2), m.group(3).strip(),
                                               comment, where))
                 continue
 
@@ -242,7 +249,7 @@ def parse_msg_file(path, errors):
             if m:
                 t, n, name, bits, default = m.groups()
                 msg.fields.append(Field(
-                    t,
+                    C_TYPE_ALIASES.get(t, t),
                     int(n) if n is not None else None,
                     name,
                     int(bits) if bits is not None else None,
@@ -350,6 +357,14 @@ def split_array_default(text):
 # ---------------------------------------------------------------------------
 # Semantic checks
 # ---------------------------------------------------------------------------
+def unsized_type_hint(type_name):
+    """C types whose size depends on the compiler."""
+    if type_name in ("int", "unsigned", "short", "long", "signed"):
+        return tr(" (size depends on the compiler; use a fixed-width type such as int32_t)",
+                  " (크기가 컴파일러마다 다름; int32_t 같은 고정 폭 타입 사용)")
+    return ""
+
+
 def freertos_type_error(type_name):
     return tr(f"FreeRTOS type '{type_name}' is not available with --os {TARGET_OS}",
               f"FreeRTOS 타입 '{type_name}' 은 --os {TARGET_OS} 에서 쓸 수 없습니다")
@@ -383,7 +398,8 @@ def validate(messages, errors):
             info = BUILTIN_TYPES.get(c.type_name)
             if info is None:
                 errors.append(f"{c.line}: error: " + tr(f"constant type must be a builtin type: '{c.type_name}'",
-                                                       f"상수 타입은 기본 타입이어야 합니다: '{c.type_name}'"))
+                                                       f"상수 타입은 기본 타입이어야 합니다: '{c.type_name}'")
+                              + unsized_type_hint(c.type_name))
                 continue
             if info.freertos and TARGET_OS != "freertos":
                 errors.append(f"{c.line}: error: " + freertos_type_error(c.type_name))
@@ -418,6 +434,9 @@ def validate(messages, errors):
             if fld.array_len is not None and fld.array_len < 1:
                 errors.append(f"{fld.line}: error: " + tr("array length must be at least 1", "배열 길이는 1 이상이어야 합니다"))
 
+            if (fld.type_name not in BUILTIN_TYPES and fld.type_name not in by_name
+                    and fld.type_name.endswith("_t") and fld.type_name[:-2] in by_name):
+                fld.type_name = fld.type_name[:-2]      # nested message by C name: vector3_t
             if fld.type_name in BUILTIN_TYPES:
                 info = BUILTIN_TYPES[fld.type_name]
                 if info.freertos and TARGET_OS != "freertos":
@@ -435,13 +454,15 @@ def validate(messages, errors):
                         "중첩 메시지 필드에는 기본값을 지정할 수 없습니다 (중첩 메시지의 기본값이 사용됩니다)"))
                 continue
             else:
-                errors.append(f"{fld.line}: error: " + tr(f"unknown type: '{fld.type_name}'", f"알 수 없는 타입: '{fld.type_name}'"))
+                errors.append(f"{fld.line}: error: " + tr(f"unknown type: '{fld.type_name}'", f"알 수 없는 타입: '{fld.type_name}'")
+                              + unsized_type_hint(fld.type_name))
                 continue
 
             if fld.bits is not None:
                 if fld.type_name not in BITFIELD_TYPES:
-                    errors.append(f"{fld.line}: error: " + tr(f"bitfields are allowed only for {', '.join(BITFIELD_TYPES)}",
-                                                             f"비트필드는 {', '.join(BITFIELD_TYPES)} 타입만 허용됩니다"))
+                    allowed = ", ".join(t + "(_t)" for t in BITFIELD_TYPES)
+                    errors.append(f"{fld.line}: error: " + tr(f"bitfields are allowed only for {allowed}",
+                                                             f"비트필드는 {allowed} 타입만 허용됩니다"))
                     continue
                 if fld.array_len is not None:
                     errors.append(f"{fld.line}: error: " + tr("arrays cannot be bitfields", "배열에는 비트필드를 쓸 수 없습니다"))

@@ -2,7 +2,9 @@
 
 English | [한국어](migration_kr.md)
 
-This guide converts FreeRTOS code whose tasks share data through **global variables and FreeRTOS queues** to uBroker. A person does the conversion. The tools in [`tools/migrate/`](../tools/migrate) do the repetitive parts. They need only Python 3 (standard library), so they can be copied into a closed network.
+This guide converts FreeRTOS code whose tasks share data through **global variables and FreeRTOS queues** to uBroker. A person does the conversion. The migration tools (`tools/migrate/`) do the repetitive parts. They need only Python 3 (standard library), so they can be copied into a closed network.
+
+> The migration tools are distributed separately and are not included in this repository.
 
 ## Procedure
 
@@ -127,6 +129,25 @@ UBK_TOPIC_MODE_REQ_CONTROL, UBK_TOPIC_MODE_REQ_COMM      /* '# TOPICS mode_req_c
 /* after, option B: CommTask publishes a request, ControlTask owns and publishes the mode */
 ```
 
+### Subscribe once per cycle
+
+Code that read a global variable directly tends to read it wherever a field is needed. Do not replace each of those reads with a `ubk_subscribe` call: every call enters a critical section and copies the whole message. Subscribe once at the start of the task cycle and use the local copy for the rest of the cycle.
+
+```c
+/* avoid: one subscribe per field access */
+ubk_subscribe(UBK_TOPIC_SENSOR_DATA, &sub, &s, sizeof(s)); a = s.accel.x;
+ubk_subscribe(UBK_TOPIC_SENSOR_DATA, &sub, &s, sizeof(s)); b = s.accel.y;
+
+/* recommended: one subscribe per cycle, then the local copy */
+ubk_subscribe(UBK_TOPIC_SENSOR_DATA, &sub, &s, sizeof(s));
+a = s.accel.x;
+b = s.accel.y;
+```
+
+- The number of calls becomes "topics per cycle" instead of "field accesses".
+- All fields used in one cycle come from the same message, so they are consistent with each other.
+- Helper functions take the local copy as a parameter (`const sensor_data_t *p_s`) instead of reading the topic again.
+
 ## Tool Notes
 
 ### ipc_inventory.py
@@ -154,6 +175,23 @@ UBK_TOPIC_MODE_REQ_CONTROL, UBK_TOPIC_MODE_REQ_COMM      /* '# TOPICS mode_req_c
 - Checks the rows whose `status` is `done` (or `--status <value>`). Comments and strings are ignored.
 - Exit code 0: nothing left, 1: references left. It can be used as a build gate.
 
+### topic_graph.py
+- Draws the topic graph (also called a pub/sub or computation graph) of code that already uses uBroker:
+  - task and ISR nodes;
+  - topic nodes;
+  - arrows for publish (node -> topic) and subscribe (topic -> node).
+- It finds `ubk_advertise` / `ubk_publish*` / `ubk_subscribe` calls with a `UBK_TOPIC_*` argument and maps them to tasks with the same call graph as `ipc_inventory.py`.
+- Outputs:
+  - `<out>.mmd`: Mermaid.
+  - `<out>.dot`: Graphviz. Render it with `dot -Tsvg <out>.dot -o <out>.svg`.
+  - `<out>_n2.csv`: N2 matrix, publishers x subscribers. Use it for large systems.
+- `--msg <dir>` adds queue lengths. `--focus <task or topic>` draws only the neighbourhood of a node.
+- It also reports:
+  - topics without a subscriber or without a publisher;
+  - topics with several publishers;
+  - `.msg` topics that the code never uses;
+  - calls whose topic ID is not a constant.
+
 ## Verification Checklist
 
 - [ ] Build with `UBK_CFG_CHECK_PUBLISHER_TASK=1` during integration: a publish from the wrong task returns `UBK_ERR_WRONG_TASK`.
@@ -162,6 +200,7 @@ UBK_TOPIC_MODE_REQ_CONTROL, UBK_TOPIC_MODE_REQ_COMM      /* '# TOPICS mode_req_c
 - [ ] `ubk_init_all()` runs once before any publish.
 - [ ] QUEUE topics: log `n_lost`. It must stay 0 in normal operation.
 - [ ] Code that used to wait on a queue now waits on a notification and drains the topic.
+- [ ] Each task subscribes to a topic once per cycle and works on the local copy.
 - [ ] `ipc_residual.py` reports 0 references left.
 - [ ] Timing: compare task execution times and interrupt latency before and after (see Performance).
 
@@ -209,6 +248,40 @@ Normally no. An interrupt that arrives inside a critical section stays **pending
   - Or use a hardware counter or DMA.
   - Or keep the topics they compete with small.
 
+### Reference systems
+
+Two open-source flight controllers of similar scale, for comparison.
+
+**PX4 (uORB, pub/sub)**
+- Scale (static count of the source code):
+  - 232 message definitions; there are more topics at run time because of multi-instance topics.
+  - About 810 publish sites and 1,445 subscribe sites.
+  - 99 modules and 42 standalone tasks.
+  - Most drivers and controllers run as work items in a few work queue threads.
+- Target: Pixhawk 6 class boards use an STM32H7 (Cortex-M7, 480 MHz).
+- Locking: on NuttX, uORB copies the message inside a critical section, the same way as the uBroker FreeRTOS port.
+- Meaning: a system of this scale, with this lock method, runs flight control on an MCU like the 500 MHz target.
+- Difference: uORB wakes waiting subscribers on publish. uBroker has no such callback; use the `queue+notify` pattern.
+
+**ArduPilot (ArduCopter)**
+- Not pub/sub. Tasks get data by **calling functions** on shared objects (e.g. `AP::ahrs()`).
+- The main scheduler is a cooperative single thread, so these calls need no lock. Data shared with other threads (driver backends) is copied under a semaphore, at a cost similar to uBroker.
+- It is used here only as a reference for **task time budgets**.
+- The main scheduler has 29 tasks at 1 to 400 Hz with maximum times of 50 to 350 µs (mostly 50 to 130 µs). That is about 1,405 task runs per second and about 11.6 % CPU if every task uses its full budget. The fast loop (attitude estimation and control) is not in this table.
+
+**uBroker cost against these budgets** (500 MHz estimate, messages of 128 B or less, about 0.5 µs per call):
+
+| Calls per task run | Total at 1,405 runs/s | Share of a 50 µs task |
+|---|---|---|
+| 5 | about 3.5 ms/s (0.35 % CPU) | about 5 % |
+| 20 | about 14 ms/s (1.4 % CPU) | about 20 % |
+
+- The whole-CPU share is small.
+- The limit is the shortest tasks. Take these steps:
+  - Subscribe once per cycle (see "Subscribe once per cycle").
+  - Keep messages at 256 B or less.
+  - Keep 1 KB messages out of 50 µs tasks; each call would take 5 to 10 % of the budget.
+
 ### Measuring on the target
 
 - **Masked time:**
@@ -216,4 +289,4 @@ Normally no. An interrupt that arrives inside a critical section stays **pending
   - Or record the worst-case DWT cycle count between `ubk_port_lock` and `ubk_port_unlock`.
 - **Before and after:** compare interrupt latency and task execution times measured with the same method before and after the migration.
 
-Sample code for trying the tools: [`tools/migrate/sample/`](../tools/migrate/sample). `expected.csv` is the inventory it should produce.
+The tools come with sample code (`tools/migrate/sample/`) and the inventory it should produce (`expected.csv`).
